@@ -1,0 +1,10 @@
+{
+  "name": "copeiro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Copeiro - Copa do Brasil (app estático client-side)",
+  "scripts": {
+    "dev": "npx serve public -l 5173",
+    "deploy:cloudflare": "npx wrangler pages deploy public --project-name=copeiro"
+  }
+}

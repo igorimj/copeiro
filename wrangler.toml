@@ -1,0 +1,6 @@
+name = "copeiro"
+compatibility_date = "2024-01-01"
+
+# Configuração para Cloudflare Pages
+# A pasta "public" é o diretório publicado (build output)
+pages_build_output_dir = "public"
