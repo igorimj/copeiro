@@ -185,6 +185,7 @@ function advanceUntilActionable(room) {
   for (;;) {
     const allResolved = room.bracket.length > 0 && room.bracket.every(m => m.winnerSide);
     if (!allResolved) return; // alguém (humano) ainda precisa jogar — para aqui
+    room.history.push({ phase: room.phase, bracket: publicBracket(room) });
     const idx = PHASES.indexOf(room.phase);
     if (room.phase === 'final' || idx === PHASES.length - 1) {
       room.stage = 'over';
@@ -219,9 +220,9 @@ function broadcast(room, msg) {
 }
 function broadcastTournamentState(room) {
   if (room.stage === 'over') {
-    broadcast(room, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room) });
+    broadcast(room, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
   } else {
-    broadcast(room, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room) });
+    broadcast(room, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room), history: room.history });
   }
 }
 
@@ -277,6 +278,7 @@ wss.on('connection', (ws) => {
           teams: new Map(),
           bracket: [],
           champion: null,
+          history: [], // snapshot de cada rodada já concluída (fase + placares)
           createdAt: Date.now(),
         };
         rooms.set(code, room);
@@ -374,18 +376,13 @@ wss.on('connection', (ws) => {
         }
         const vencedor = m.winnerSide === 'home' ? m.home.nome : m.away.nome;
         console.log(`[${room.id}] resultado: ${m.home.nome} ${m.score.home} x ${m.score.away} ${m.away.nome} — vencedor: ${vencedor}`);
-        if (room.bracket.every(x => x.winnerSide)) {
-          const curIdx = PHASES.indexOf(room.phase);
-          if (room.phase === 'final' || curIdx === PHASES.length - 1) {
-            room.stage = 'over';
-            room.champion = winnerTeam(room.bracket[0]) || null;
-            console.log(`[${room.id}] torneio encerrado — campeão: ${room.champion ? room.champion.nome : '???'}`);
-          } else {
-            room.phase = PHASES[curIdx + 1];
-            room.bracket = buildPhase(room, room.phase);
-            advanceUntilActionable(room);
-            console.log(`[${room.id}] fase avançou para ${room.phase} (${room.bracket.length} partidas)`);
-          }
+        advanceUntilActionable(room);
+        if (room.stage === 'over') {
+          console.log(`[${room.id}] torneio encerrado — campeão: ${room.champion ? room.champion.nome : '???'}`);
+        } else if (room.bracket.every(x => x.winnerSide) === false) {
+          // ainda restam partidas pendentes nesta mesma fase — nada a logar
+        } else {
+          console.log(`[${room.id}] fase avançou para ${room.phase} (${room.bracket.length} partidas)`);
         }
         broadcastTournamentState(room);
         break;
@@ -395,9 +392,9 @@ wss.on('connection', (ws) => {
         const room = rooms.get(ws.roomCode);
         if (!room) return;
         if (room.stage === 'tournament') {
-          send(ws, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room) });
+          send(ws, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room), history: room.history });
         } else if (room.stage === 'over') {
-          send(ws, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room) });
+          send(ws, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
         } else if (room.stage === 'draft') {
           send(ws, { type: 'draftPhase', room: publicRoom(room) });
           send(ws, { type: 'draftProgress', done: room.draftDone.size, total: room.players.size, doneIds: Array.from(room.draftDone) });
