@@ -29,6 +29,28 @@ const PHASES = ['4a', '5a', 'oitavas', 'quartas', 'semi', 'final'];
 /** @type {Map<string, any>} */
 const rooms = new Map();
 
+// ── Ranking Diário (compartilhado entre todos os jogadores) ───────────
+// Guardado em memória, agrupado por dia (YYYY-MM-DD) — assim "zera"
+// sozinho quando o dia muda, sem precisar de limpeza manual do dia atual.
+/** @type {Map<string, Map<string, number>>} */
+const dailyScores = new Map();
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+}
+function getTodayScores() {
+  const key = todayKey();
+  if (!dailyScores.has(key)) dailyScores.set(key, new Map());
+  return dailyScores.get(key);
+}
+function getDailyRankingList() {
+  const scores = getTodayScores();
+  return Array.from(scores.entries())
+    .map(([name, pts]) => ({ name, pts }))
+    .sort((a, b) => b.pts - a.pts)
+    .slice(0, 20);
+}
+
 // ── utilidades ────────────────────────────────────────────────────────
 function genCode() {
   let code;
@@ -244,11 +266,50 @@ function leaveRoom(ws) {
 
 // ── HTTP + WebSocket ────────────────────────────────────────────────────
 const server = http.createServer((req, res) => {
+  // CORS liberado — o frontend roda em outro domínio (Cloudflare/Render)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
   if (req.url === '/' || req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('copeiro-multiplayer: ok');
     return;
   }
+
+  if (req.url === '/daily-ranking' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ranking: getDailyRankingList(), date: todayKey() }));
+    return;
+  }
+
+  if (req.url === '/daily-score' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; if (body.length > 10_000) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const data = JSON.parse(body || '{}');
+        const name = String(data.name || '').trim().slice(0, 30);
+        const pts = Number(data.pts);
+        if (!name || !Number.isFinite(pts) || pts < 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'dados inválidos' }));
+          return;
+        }
+        const scores = getTodayScores();
+        const current = scores.get(name) || 0;
+        if (pts > current) scores.set(name, pts); // só atualiza se for melhor que a marca do dia
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ranking: getDailyRankingList(), date: todayKey() }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'JSON inválido' }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404); res.end();
 });
 
@@ -430,7 +491,16 @@ const cleanupInterval = setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
-wss.on('close', () => { clearInterval(pingInterval); clearInterval(cleanupInterval); });
+// limpeza de dias antigos do ranking (mantém só hoje e ontem, por segurança
+// de fuso horário — nunca deixa crescer sem limite)
+const dailyCleanupInterval = setInterval(() => {
+  const keep = new Set([todayKey(), new Date(Date.now() - 86400000).toISOString().slice(0, 10)]);
+  for (const key of dailyScores.keys()) {
+    if (!keep.has(key)) dailyScores.delete(key);
+  }
+}, 60 * 60 * 1000);
+
+wss.on('close', () => { clearInterval(pingInterval); clearInterval(cleanupInterval); clearInterval(dailyCleanupInterval); });
 
 server.listen(PORT, () => {
   console.log(`Copeiro multiplayer server ouvindo na porta ${PORT}`);
