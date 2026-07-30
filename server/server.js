@@ -291,15 +291,18 @@ const server = http.createServer((req, res) => {
       try {
         const data = JSON.parse(body || '{}');
         const name = String(data.name || '').trim().slice(0, 30);
-        const pts = Number(data.pts);
-        if (!name || !Number.isFinite(pts) || pts < 0) {
+        const delta = Number(data.delta);
+        if (!name || !Number.isFinite(delta) || delta < 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'dados inválidos' }));
           return;
         }
         const scores = getTodayScores();
         const current = scores.get(name) || 0;
-        if (pts > current) scores.set(name, pts); // só atualiza se for melhor que a marca do dia
+        // Soma os pontos ganhos nessa sessão ao total acumulado do dia
+        // (o cliente manda só o incremento desde o último envio, nunca
+        // o total inteiro de novo — evita contar pontos em dobro).
+        if (delta > 0) scores.set(name, current + delta);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ranking: getDailyRankingList(), date: todayKey() }));
       } catch (e) {
