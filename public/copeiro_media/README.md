@@ -1,7 +1,7 @@
 # Pasta copeiro_media
 
 ## ✅ Selos de estádio — já incluídos
-Os 11 arquivos PNG dos selos "Clube Formador" já estão nesta pasta, com os
+Os 12 arquivos PNG dos selos "Clube Formador" já estão nesta pasta, com os
 nomes exatos esperados pelo `index.html` (sem acentos de propósito, pra
 evitar problemas de codificação ao subir pelo GitHub):
 
@@ -9,6 +9,7 @@ evitar problemas de codificação ao subir pelo GitHub):
 - Estadio_Castelao_Selo_Lendario.png
 - Estadio_Couto_Pereira_Selo_Lendario.png
 - Estadio_Ilha_do_Retiro_Selo_Lendario.png
+- Estadio_Maracana_Selo_Lendario.png
 - Estadio_Mineirao_Selo_Lendario.png
 - Estadio_Morumbil_Selo_Lendario.png
 - Estadio_Olimpico_Monumental_Selo_Lendario.png
