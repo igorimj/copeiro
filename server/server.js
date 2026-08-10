@@ -216,6 +216,7 @@ function advanceUntilActionable(room) {
     }
     room.phase = PHASES[idx + 1];
     room.bracket = buildPhase(room, room.phase);
+    room.phaseReady = new Set(); // nova fase — todo mundo precisa clicar em "Continuar" de novo
   }
 }
 
@@ -245,6 +246,7 @@ function broadcastTournamentState(room) {
     broadcast(room, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
   } else {
     broadcast(room, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room), history: room.history });
+    broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done: (room.phaseReady ? room.phaseReady.size : 0), total: room.players.size, doneIds: Array.from(room.phaseReady || []) });
   }
 }
 
@@ -256,12 +258,19 @@ function leaveRoom(ws) {
   room.players.delete(ws.id);
   room.draftDone.delete(ws.id);
   room.teams.delete(ws.id);
+  if (room.phaseReady) room.phaseReady.delete(ws.id);
   if (room.players.size === 0) { rooms.delete(room.id); return; }
   if (wasHost) {
     const next = room.players.values().next().value;
     if (next) next.host = true;
   }
   broadcast(room, { type: 'update', room: publicRoom(room) });
+  // se alguém saiu no meio do torneio, o total de jogadores mudou — reenvia
+  // o progresso de "prontos" pra fase atual não ficar esperando pra sempre
+  // por alguém que já não está mais na sala
+  if (room.stage === 'tournament') {
+    broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done: (room.phaseReady ? room.phaseReady.size : 0), total: room.players.size, doneIds: Array.from(room.phaseReady || []) });
+  }
 }
 
 // ── HTTP + WebSocket ────────────────────────────────────────────────────
@@ -403,6 +412,7 @@ wss.on('connection', (ws) => {
           room.stage = 'tournament';
           room.phase = '4a';
           room.bracket = buildPhase4a(room);
+          room.phaseReady = new Set();
           advanceUntilActionable(room);
           console.log(`[${room.id}] torneio iniciado — fase ${room.phase}, ${room.bracket.length} partidas`);
           broadcastTournamentState(room);
@@ -451,12 +461,28 @@ wss.on('connection', (ws) => {
         broadcastTournamentState(room);
         break;
       }
+      // jogador clicou em "Continuar" — só libera pra jogar quando todo
+      // mundo da sala tiver clicado também
+      case 'phaseReady': {
+        const room = rooms.get(ws.roomCode);
+        if (!room || room.stage !== 'tournament') return;
+        if (!room.players.has(ws.id)) return;
+        if (msg.phase !== room.phase) return; // cliente atrasado numa fase antiga — ignora
+        if (!room.phaseReady) room.phaseReady = new Set();
+        room.phaseReady.add(ws.id);
+        const total = room.players.size;
+        const done = room.phaseReady.size;
+        console.log(`[${room.id}] pronto pra fase ${room.phase}: ${done}/${total}`);
+        broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total, doneIds: Array.from(room.phaseReady) });
+        break;
+      }
       // cliente pede o estado atual de novo (recuperação caso a tela trave)
       case 'resync': {
         const room = rooms.get(ws.roomCode);
         if (!room) return;
         if (room.stage === 'tournament') {
           send(ws, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room), history: room.history });
+          send(ws, { type: 'phaseReadyProgress', phase: room.phase, done: (room.phaseReady ? room.phaseReady.size : 0), total: room.players.size, doneIds: Array.from(room.phaseReady || []) });
         } else if (room.stage === 'over') {
           send(ws, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
         } else if (room.stage === 'draft') {

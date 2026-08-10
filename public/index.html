@@ -1737,11 +1737,18 @@ function _mpEnsureSocket(onOpen){
         // avisado da eliminação mesmo sem ter jogado a partida eu mesmo
         // (quem jogou, nesse caso, foi o outro jogador humano).
         var prevDuel=(G.bracket||[]).find(function(m){
-          return m._mpId&&((m.home&&m.home._mpAwaitingDuel)||(m.away&&m.away._mpAwaitingDuel))&&!m.winner;
+          return m._mpId&&((m.home&&m.home._mpAwaitingDuel)||(m.away&&m.away._mpAwaitingDuel))&&!m._mpReported;
         });
         var enteringOitavas = (msg.phase==='oitavas' && G.phase!=='oitavas');
+        var isNewPhase = (msg.phase!==G.phase);
         G.phase=msg.phase;
         G.bracket=mpConvertBracket(msg.bracket);
+        if(isNewPhase){
+          // Nova rodada — todo mundo precisa clicar em "Continuar" de novo
+          // antes de qualquer partida (inclusive as bot-vs-bot) começar.
+          G._phaseReadyDone=false;
+          G._phaseReadyProgress=null;
+        }
         if(prevDuel){
           var resolved=G.bracket.find(function(m){return m._mpId===prevDuel._mpId;});
           if(resolved&&resolved.winner&&!resolved.winner._mpMine){
@@ -1758,6 +1765,11 @@ function _mpEnsureSocket(onOpen){
         }
         showBracket3();
       }
+    } else if(msg.type==='phaseReadyProgress'){
+      if(msg.phase!==G.phase)return; // progresso de uma fase antiga — ignora
+      G._phaseReadyProgress={done:msg.done,total:msg.total};
+      var activeScreen2=document.querySelector('.screen.active');
+      if(activeScreen2&&activeScreen2.id==='s-bracket')showBracket3();
     } else if(msg.type==='tournamentOver'){
       G._mpHistory=msg.history||G._mpHistory||[];
       var elimOverlay=document.getElementById('mp-overlay');
@@ -2036,6 +2048,18 @@ function mpShowDraftWaitOverlay(p){
 }
 function mpHideOverlay(){
   var ov=document.getElementById('mp-overlay'); if(ov)ov.remove();
+}
+// Jogador clicou em "Continuar" na tela do chaveamento — avisa o servidor
+// e espera todo mundo da sala fazer o mesmo antes de liberar o botão real
+// de jogar (evita alguém começar a rodada, e ver os placares das outras
+// partidas ao vivo, antes dos outros terem sequer visto o chaveamento novo).
+function mpSendPhaseReady(){
+  if(G._phaseReadyDone)return;
+  G._phaseReadyDone=true;
+  if(_mpSocket&&_mpSocket.readyState===WebSocket.OPEN){
+    _mpSocket.send(JSON.stringify({type:'phaseReady', phase:G.phase}));
+  }
+  if(typeof showBracket3==='function')showBracket3();
 }
 function mpShowChampionOverlay(champ){
   var old=document.getElementById('mp-overlay'); if(old)old.remove();
@@ -3416,14 +3440,24 @@ function showBracket3(){
   document.getElementById('br-content').innerHTML=`<div class="phase-badge">${PHASE_LBL[G.phase]||G.phase} — ${G.bracket.length} jogos</div>${rows}`;
   
   var pm2=G.bracket.find(m=>m.home&&m.away&&(m.home.isPlayer||m.away.isPlayer)&&m.winner===null);
-  var awaitingDuel=G.mp&&G.bracket.find(m=>m.home&&m.away&&(m.home._mpAwaitingDuel||m.away._mpAwaitingDuel)&&m.winner===null);
+  var awaitingDuel=G.mp&&G.bracket.find(m=>m.home&&m.away&&(m.home._mpAwaitingDuel||m.away._mpAwaitingDuel)&&!m._mpReported);
   var meAnywhere=G.mp&&G.bracket.some(m=>m.home&&m.away&&(m.home._mpMine||m.away._mpMine));
+  var prog=G._phaseReadyProgress;
+  var allReady=!G.mp||(prog&&prog.total>0&&prog.done>=prog.total);
   var btn=document.getElementById('br-play-btn');
-  if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';}
-  else if(G.mp&&!meAnywhere){btn.disabled=true;btn.textContent='👁 Acompanhando (eliminado)';}
-  else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';}
-  else if(isDual&&pm2.hg!=null&&pm2.hg2==null){btn.disabled=false;btn.textContent='⚽ Jogo de Volta';}
-  else{btn.disabled=false;btn.textContent='⚽ Jogar Partida';}
+  if(G.mp&&!G._phaseReadyDone){
+    btn.disabled=false;
+    btn.textContent='▶️ Continuar';
+    btn.onclick=function(){mpSendPhaseReady();};
+  } else if(G.mp&&!allReady){
+    btn.disabled=true;
+    btn.textContent='⏳ Aguardando outros jogadores'+(prog?(' ('+prog.done+'/'+prog.total+')'):'')+'...';
+    btn.onclick=null;
+  } else if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';btn.onclick=null;}
+  else if(G.mp&&!meAnywhere){btn.disabled=true;btn.textContent='👁 Acompanhando (eliminado)';btn.onclick=null;}
+  else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
+  else if(isDual&&pm2.hg!=null&&pm2.hg2==null){btn.disabled=false;btn.textContent='⚽ Jogo de Volta';btn.onclick=function(){playMatch();};}
+  else{btn.disabled=false;btn.textContent='⚽ Jogar Partida';btn.onclick=function(){playMatch();};}
   show('s-bracket');
 }
 showBracket=showBracket3;
@@ -5114,25 +5148,41 @@ function startSim3() {
   var isDual = DUAL_PHASES.includes(G.phase);
   var isLeg2 = isDual && G.leg === 2;
 
-  // Pre-sim ALL bot matches (results hidden until FT)
+  // Pre-sim ALL bot matches (resultado revelado aos poucos, minuto a minuto)
   G._botResultsPending = true;
   G.bracket.forEach(m => {
     if (!m.home || !m.away || m.home.isPlayer || m.away.isPlayer) return;
-    if (!isLeg2 && m.hg === null && m.winner === null) {
-      var r = simMatch(m.home, m.away);
-      m.hg = r.hg; m.ag = r.ag; m.hsc = r.hsc; m.asc = r.asc;
-      if (!isDual) resolveBotWinner(m);
-    } else if (isLeg2 && m.hg2 === null && m.winner === null) {
-      var r = simMatch(m.away, m.home);
-      // simMatch(away, home) trata m.away como mandante NESSA chamada,
-      // então r.hg são os gols de m.away e r.ag são os gols de m.home —
-      // é preciso inverter na hora de guardar em hg2/ag2 (que seguem a
-      // convenção normal: hg2 = gols do m.home, ag2 = gols do m.away).
-      m.hg2 = r.ag; m.ag2 = r.hg; m.hsc2 = r.asc; m.asc2 = r.hsc;
-      var hT = m.hg + (m.hg2 || 0), aT = m.ag + (m.ag2 || 0);
-      if (hT > aT) m.winner = m.home;
-      else if (aT > hT) m.winner = m.away;
-      else { var p = botPen(m.home,m.away); m.pen = p.h + '-' + p.a; m.winner = p.h > p.a ? m.home : m.away; }
+    if (!isLeg2) {
+      if (m.hg === null && m.winner === null) {
+        var r = simMatch(m.home, m.away);
+        m.hg = r.hg; m.ag = r.ag; m.hsc = r.hsc; m.asc = r.asc;
+        if (!isDual) resolveBotWinner(m);
+      } else if (m.hg !== null && !m.hsc) {
+        // No multiplayer, bot-vs-bot já vem resolvido (placar e vencedor)
+        // direto do servidor, sem minutos de gol. Geramos os minutos
+        // aqui localmente só pra poder revelar o placar aos poucos
+        // durante a animação — o resultado final não muda.
+        var um = new Set();
+        m.hsc = scorers(m.home, m.hg, um);
+        m.asc = scorers(m.away, m.ag, um);
+      }
+    } else {
+      if (m.hg2 === null && m.winner === null) {
+        var r = simMatch(m.away, m.home);
+        // simMatch(away, home) trata m.away como mandante NESSA chamada,
+        // então r.hg são os gols de m.away e r.ag são os gols de m.home —
+        // é preciso inverter na hora de guardar em hg2/ag2 (que seguem a
+        // convenção normal: hg2 = gols do m.home, ag2 = gols do m.away).
+        m.hg2 = r.ag; m.ag2 = r.hg; m.hsc2 = r.asc; m.asc2 = r.hsc;
+        var hT = m.hg + (m.hg2 || 0), aT = m.ag + (m.ag2 || 0);
+        if (hT > aT) m.winner = m.home;
+        else if (aT > hT) m.winner = m.away;
+        else { var p = botPen(m.home,m.away); m.pen = p.h + '-' + p.a; m.winner = p.h > p.a ? m.home : m.away; }
+      } else if (m.hg2 !== null && !m.hsc2) {
+        var um2 = new Set();
+        m.hsc2 = scorers(m.home, m.hg2, um2);
+        m.asc2 = scorers(m.away, m.ag2, um2);
+      }
     }
   });
 
@@ -5194,7 +5244,6 @@ function renderMatchFinal(currentMin, showAll) {
   var matchBg = c.matchBg || c.bg;
   var isDual = DUAL_PHASES.includes(G.phase);
   var isLeg2 = isDual && G.leg === 2;
-  var botPending = G._botResultsPending && !showAll;
 
   let rows = '';
   G.bracket.forEach((m, i) => {
@@ -5240,18 +5289,24 @@ function renderMatchFinal(currentMin, showAll) {
                                  : (showAll ? (m.playerG2||0) : playerScorerList.length);
       }
     } else {
-      // Bot vs bot: hide until FT — usa o placar da rodada atual (ida
-      // ou volta), já que agora os lados também trocam na volta
-      var curHg = isLeg2 ? (m.hg2 ?? 0) : (m.hg ?? 0);
-      var curAg = isLeg2 ? (m.ag2 ?? 0) : (m.ag ?? 0);
-      dispLeft  = botPending ? 0 : (leftTeam === m.home ? curHg : curAg);
-      dispRight = botPending ? 0 : (rightTeam === m.away ? curAg : curHg);
+      // Bot vs bot: revela os gols em tempo real, minuto a minuto, em
+      // sincronia com o relógio da partida do jogador — em vez de
+      // esconder tudo até o apito final. Usa os artilheiros já
+      // pré-simulados (hsc/asc ou hsc2/asc2 na volta) filtrando por
+      // minuto, do mesmo jeito que já é feito pra partida do jogador.
+      var curHsc = (isLeg2 ? m.hsc2 : m.hsc) || [];
+      var curAsc = (isLeg2 ? m.asc2 : m.asc) || [];
+      var curHgFinal = isLeg2 ? (m.hg2 ?? 0) : (m.hg ?? 0);
+      var curAgFinal = isLeg2 ? (m.ag2 ?? 0) : (m.ag ?? 0);
+      var curHg = showAll ? curHgFinal : curHsc.filter(g => g.min <= currentMin).length;
+      var curAg = showAll ? curAgFinal : curAsc.filter(g => g.min <= currentMin).length;
+      dispLeft  = (leftTeam === m.home ? curHg : curAg);
+      dispRight = (rightTeam === m.away ? curAg : curHg);
       playerScorerList = []; botScorerList = []; playerOnLeft = false;
     }
 
-    var timerTxt = isPlayerMatch
-      ? (showAll ? 'FT' : (currentMin >= 90 ? '90+' : currentMin + "'"))
-      : (botPending ? '—' : 'FT');
+    var timerTxt = showAll ? 'FT' : (currentMin >= 90 ? '90+' : currentMin + "'");
+
 
     // ── Aggregate (only at FT of leg2) ──────────────────────────────
     let aggHtml = '';
@@ -5264,7 +5319,9 @@ function renderMatchFinal(currentMin, showAll) {
       aggHtml = `<div style="font-size:.63rem;color:var(--gold);font-weight:700;">Agr: ${aggLeft}×${aggRight}</div>`;
     }
 
-    // ── Goal logs: player side shows player scorers, bot side shows bot ──
+    // ── Goal logs: cada lado mostra seus próprios artilheiros — vale
+    // tanto pra partida do jogador quanto pras demais partidas, já que
+    // agora todas revelam os gols em tempo real ──────────────────────
     let leftLog = '', rightLog = '';
     if (isPlayerMatch) {
       var leftSc  = playerOnLeft ? playerScorerList : botScorerList;
@@ -5273,6 +5330,15 @@ function renderMatchFinal(currentMin, showAll) {
         leftLog = `<div class="goal-log">${leftSc.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
       if (rightSc.length)
         rightLog = `<div class="goal-log" style="text-align:right;">${rightSc.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
+    } else {
+      var leftScB  = (leftTeam === m.home) ? curHsc : curAsc;
+      var rightScB = (rightTeam === m.away) ? curAsc : curHsc;
+      var leftScBf  = showAll ? leftScB  : leftScB.filter(g => g.min <= currentMin);
+      var rightScBf = showAll ? rightScB : rightScB.filter(g => g.min <= currentMin);
+      if (leftScBf.length)
+        leftLog = `<div class="goal-log">${leftScBf.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
+      if (rightScBf.length)
+        rightLog = `<div class="goal-log" style="text-align:right;">${rightScBf.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
     }
 
     var penDisplay = m.pen;
@@ -7124,7 +7190,8 @@ function startGame() {
     speed:'n', simTimer:null, _simTick:0, _simTotalSteps:60,
     dailyPts:0, _dailyPtsReported:0, eliminated:false, leg:1,
     _draftSkippedTeams:[], _draftPool:[], _draftPoolIdx:0,
-    _botResultsPending:false, wonAllNormalTime:true
+    _botResultsPending:false, wonAllNormalTime:true,
+    _phaseReadyDone:false, _phaseReadyProgress:null
   };
   document.querySelectorAll('.cswatch').forEach(function(s){ s.classList.remove('sel'); });
   var az = document.querySelector('.cswatch[data-c="azul"]');
