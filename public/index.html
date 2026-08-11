@@ -1888,6 +1888,14 @@ function mpConvertBracket(list){
     var entry={_mpId:m.id, home:home, away:away,
       hg:null,ag:null,hg2:null,ag2:null,hsc:[],asc:[],hsc2:[],asc2:[],pen:null, winner:winner};
     if(m.score){ entry.hg=m.score.home; entry.ag=m.score.away; entry.pen=m.score.pen||null; }
+    var bothBot=(home._mpKind!=='human'&&away._mpKind!=='human');
+    if(bothBot&&entry.hg!=null){
+      // O servidor resolve bot-vs-bot num placar só, sem ida e volta de
+      // verdade. Preenchemos a "volta" como 0×0 (já encerrada) pra não
+      // ficar mostrando "Volta pendente" pra sempre numa fase de dois
+      // jogos — o placar de ida já É o resultado final dessa partida.
+      entry.hg2=0; entry.ag2=0;
+    }
     if(winner){
       entry._mpReported=true; // já resolvida no servidor, não reenviar
     } else if(!home._mpMine&&!away._mpMine){
@@ -3445,7 +3453,11 @@ function showBracket3(){
   var prog=G._phaseReadyProgress;
   var allReady=!G.mp||(prog&&prog.total>0&&prog.done>=prog.total);
   var btn=document.getElementById('br-play-btn');
-  if(G.mp&&!G._phaseReadyDone){
+  if(G.mp&&!meAnywhere){
+    // Já fui eliminado — só acompanho, não entro no "check de prontos"
+    // (senão a sala trava esperando alguém que não tem mais nada a jogar)
+    btn.disabled=true;btn.textContent='👁 Acompanhando (eliminado)';btn.onclick=null;
+  } else if(G.mp&&!G._phaseReadyDone){
     btn.disabled=false;
     btn.textContent='▶️ Continuar';
     btn.onclick=function(){mpSendPhaseReady();};
@@ -3454,7 +3466,6 @@ function showBracket3(){
     btn.textContent='⏳ Aguardando outros jogadores'+(prog?(' ('+prog.done+'/'+prog.total+')'):'')+'...';
     btn.onclick=null;
   } else if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';btn.onclick=null;}
-  else if(G.mp&&!meAnywhere){btn.disabled=true;btn.textContent='👁 Acompanhando (eliminado)';btn.onclick=null;}
   else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
   else if(isDual&&pm2.hg!=null&&pm2.hg2==null){btn.disabled=false;btn.textContent='⚽ Jogo de Volta';btn.onclick=function(){playMatch();};}
   else{btn.disabled=false;btn.textContent='⚽ Jogar Partida';btn.onclick=function(){playMatch();};}
@@ -5157,7 +5168,7 @@ function startSim3() {
         var r = simMatch(m.home, m.away);
         m.hg = r.hg; m.ag = r.ag; m.hsc = r.hsc; m.asc = r.asc;
         if (!isDual) resolveBotWinner(m);
-      } else if (m.hg !== null && !m.hsc) {
+      } else if (m.hg !== null && (!m.hsc || !m.hsc.length) && (!m.asc || !m.asc.length) && (m.hg > 0 || m.ag > 0)) {
         // No multiplayer, bot-vs-bot já vem resolvido (placar e vencedor)
         // direto do servidor, sem minutos de gol. Geramos os minutos
         // aqui localmente só pra poder revelar o placar aos poucos
@@ -5178,7 +5189,7 @@ function startSim3() {
         if (hT > aT) m.winner = m.home;
         else if (aT > hT) m.winner = m.away;
         else { var p = botPen(m.home,m.away); m.pen = p.h + '-' + p.a; m.winner = p.h > p.a ? m.home : m.away; }
-      } else if (m.hg2 !== null && !m.hsc2) {
+      } else if (m.hg2 !== null && (!m.hsc2 || !m.hsc2.length) && (!m.asc2 || !m.asc2.length) && (m.hg2 > 0 || m.ag2 > 0)) {
         var um2 = new Set();
         m.hsc2 = scorers(m.home, m.hg2, um2);
         m.asc2 = scorers(m.away, m.ag2, um2);

@@ -236,6 +236,18 @@ function publicBracket(room) {
     score: m.score || null,
   }));
 }
+// IDs dos jogadores humanos que ainda têm um time vivo na fase atual do
+// chaveamento — ou seja, que ainda precisam clicar em "Continuar" pra essa
+// rodada. Jogadores já eliminados (só acompanhando) ficam de fora, senão a
+// sala trava esperando alguém que não tem mais nada pra jogar.
+function activePlayerIds(room) {
+  const ids = new Set();
+  for (const m of (room.bracket || [])) {
+    if (m.home && m.home.kind === 'human' && m.home.ownerId) ids.add(m.home.ownerId);
+    if (m.away && m.away.kind === 'human' && m.away.ownerId) ids.add(m.away.ownerId);
+  }
+  return ids;
+}
 function send(ws, msg) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
 function broadcast(room, msg) {
   const data = JSON.stringify(msg);
@@ -246,7 +258,9 @@ function broadcastTournamentState(room) {
     broadcast(room, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
   } else {
     broadcast(room, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room), history: room.history });
-    broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done: (room.phaseReady ? room.phaseReady.size : 0), total: room.players.size, doneIds: Array.from(room.phaseReady || []) });
+    const activeIds = activePlayerIds(room);
+    const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
+    broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
   }
 }
 
@@ -269,7 +283,9 @@ function leaveRoom(ws) {
   // o progresso de "prontos" pra fase atual não ficar esperando pra sempre
   // por alguém que já não está mais na sala
   if (room.stage === 'tournament') {
-    broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done: (room.phaseReady ? room.phaseReady.size : 0), total: room.players.size, doneIds: Array.from(room.phaseReady || []) });
+    const activeIds = activePlayerIds(room);
+    const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
+    broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
   }
 }
 
@@ -462,7 +478,7 @@ wss.on('connection', (ws) => {
         break;
       }
       // jogador clicou em "Continuar" — só libera pra jogar quando todo
-      // mundo da sala tiver clicado também
+      // mundo que ainda tem time na fase (não eliminado) tiver clicado
       case 'phaseReady': {
         const room = rooms.get(ws.roomCode);
         if (!room || room.stage !== 'tournament') return;
@@ -470,8 +486,9 @@ wss.on('connection', (ws) => {
         if (msg.phase !== room.phase) return; // cliente atrasado numa fase antiga — ignora
         if (!room.phaseReady) room.phaseReady = new Set();
         room.phaseReady.add(ws.id);
-        const total = room.players.size;
-        const done = room.phaseReady.size;
+        const activeIds = activePlayerIds(room);
+        const total = activeIds.size;
+        const done = Array.from(room.phaseReady).filter(id => activeIds.has(id)).length;
         console.log(`[${room.id}] pronto pra fase ${room.phase}: ${done}/${total}`);
         broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total, doneIds: Array.from(room.phaseReady) });
         break;
@@ -482,7 +499,9 @@ wss.on('connection', (ws) => {
         if (!room) return;
         if (room.stage === 'tournament') {
           send(ws, { type: 'tournamentUpdate', phase: room.phase, bracket: publicBracket(room), history: room.history });
-          send(ws, { type: 'phaseReadyProgress', phase: room.phase, done: (room.phaseReady ? room.phaseReady.size : 0), total: room.players.size, doneIds: Array.from(room.phaseReady || []) });
+          const activeIds = activePlayerIds(room);
+          const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
+          send(ws, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
         } else if (room.stage === 'over') {
           send(ws, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
         } else if (room.stage === 'draft') {
