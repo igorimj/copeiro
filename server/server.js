@@ -25,6 +25,7 @@ const ROOM_TTL_MS = 6 * 60 * 60 * 1000; // limpa salas abandonadas após 6h
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sem 0/O/1/I
 
 const PHASES = ['4a', '5a', 'oitavas', 'quartas', 'semi', 'final'];
+const PLAY_AGAIN_WINDOW_MS = 10000; // 10s pra todo mundo confirmar "Jogar Novamente"
 
 /** @type {Map<string, any>} */
 const rooms = new Map();
@@ -268,6 +269,15 @@ function leaveRoom(ws) {
   const room = rooms.get(ws.roomCode);
   ws.roomCode = null;
   if (!room) return;
+  // Se alguém sai (ou volta pro menu) durante a janela de "Jogar
+  // Novamente", não tem mais como completar "todo mundo confirmou" —
+  // encerra a sala pra quem ficou, do mesmo jeito que se tivesse clicado
+  // em outro botão.
+  if (room.stage === 'over' && room.playAgainTimer) {
+    console.log(`[${room.id}] jogador saiu durante a janela de "Jogar Novamente" — encerrando sala`);
+    closeRoom(room, 'player-left');
+    return;
+  }
   const wasHost = room.players.get(ws.id)?.host;
   room.players.delete(ws.id);
   room.draftDone.delete(ws.id);
@@ -287,6 +297,55 @@ function leaveRoom(ws) {
     const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
     broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
   }
+}
+
+// ── "Jogar Novamente" ao fim da Copa ──────────────────────────────────
+// Cada jogador tem PLAY_AGAIN_WINDOW_MS pra confirmar. Se todos confirmarem
+// a tempo, a sala reinicia pro draft de uma nova Copa (sem ninguém sair da
+// sala). Se alguém clicar em outra coisa (sai da sala) ou o tempo esgotar
+// sem todo mundo confirmar, a sala é encerrada pra todos.
+function clearPlayAgainTimer(room) {
+  if (room.playAgainTimer) { clearTimeout(room.playAgainTimer); room.playAgainTimer = null; }
+}
+function broadcastPlayAgainStatus(room) {
+  broadcast(room, {
+    type: 'playAgainStatus',
+    done: room.playAgainVotes ? room.playAgainVotes.size : 0,
+    total: room.players.size,
+    doneIds: room.playAgainVotes ? Array.from(room.playAgainVotes) : [],
+    deadline: room.playAgainDeadline || null,
+  });
+}
+function startPlayAgainWindow(room) {
+  clearPlayAgainTimer(room);
+  room.playAgainVotes = new Set();
+  room.playAgainDeadline = Date.now() + PLAY_AGAIN_WINDOW_MS;
+  room.playAgainTimer = setTimeout(() => {
+    if (!rooms.has(room.id)) return; // sala já foi fechada/reiniciada por outro caminho
+    console.log(`[${room.id}] tempo esgotado pra "Jogar Novamente" — encerrando sala`);
+    closeRoom(room, 'timeout');
+  }, PLAY_AGAIN_WINDOW_MS);
+  broadcastPlayAgainStatus(room);
+}
+function closeRoom(room, reason) {
+  clearPlayAgainTimer(room);
+  broadcast(room, { type: 'roomClosed', reason });
+  rooms.delete(room.id);
+}
+function restartRoomForNewCup(room) {
+  clearPlayAgainTimer(room);
+  room.stage = 'draft';
+  room.phase = null;
+  room.bracket = [];
+  room.champion = null;
+  room.history = [];
+  room.draftDone = new Set();
+  room.teams = new Map();
+  room.phaseReady = new Set();
+  room.playAgainVotes = null;
+  room.playAgainDeadline = null;
+  console.log(`[${room.id}] "Jogar Novamente" confirmado por todos — nova Copa começando (${room.players.size} jogadores)`);
+  broadcast(room, { type: 'draftPhase', room: publicRoom(room) });
 }
 
 // ── HTTP + WebSocket ────────────────────────────────────────────────────
@@ -475,6 +534,7 @@ wss.on('connection', (ws) => {
           console.log(`[${room.id}] fase avançou para ${room.phase} (${room.bracket.length} partidas)`);
         }
         broadcastTournamentState(room);
+        if (room.stage === 'over') startPlayAgainWindow(room);
         break;
       }
       // jogador clicou em "Continuar" — só libera pra jogar quando todo
@@ -504,11 +564,27 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
         } else if (room.stage === 'over') {
           send(ws, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
+          if (room.playAgainTimer) send(ws, { type: 'playAgainStatus', done: room.playAgainVotes ? room.playAgainVotes.size : 0, total: room.players.size, doneIds: room.playAgainVotes ? Array.from(room.playAgainVotes) : [], deadline: room.playAgainDeadline || null });
         } else if (room.stage === 'draft') {
           send(ws, { type: 'draftPhase', room: publicRoom(room) });
           send(ws, { type: 'draftProgress', done: room.draftDone.size, total: room.players.size, doneIds: Array.from(room.draftDone) });
         } else {
           send(ws, { type: 'update', room: publicRoom(room) });
+        }
+        break;
+      }
+      // jogador confirmou que quer jogar uma nova Copa nessa mesma sala
+      case 'playAgain': {
+        const room = rooms.get(ws.roomCode);
+        if (!room || room.stage !== 'over') return;
+        if (!room.players.has(ws.id)) return;
+        if (!room.playAgainVotes) room.playAgainVotes = new Set();
+        room.playAgainVotes.add(ws.id);
+        console.log(`[${room.id}] "Jogar Novamente": ${room.playAgainVotes.size}/${room.players.size}`);
+        if (room.playAgainVotes.size >= room.players.size) {
+          restartRoomForNewCup(room);
+        } else {
+          broadcastPlayAgainStatus(room);
         }
         break;
       }

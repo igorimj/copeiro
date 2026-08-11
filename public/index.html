@@ -576,7 +576,9 @@ body{background:var(--dark);color:var(--text);font-family:'Inter',sans-serif;min
     <div id="br-content"></div>
     <div class="row" style="flex-wrap:wrap;gap:9px;">
       <button class="btn btn-gold" style="flex:1;justify-content:center;min-width:140px;" id="br-play-btn" onclick="playMatch()">⚽ Jogar Partida</button>
+      <button class="btn btn-out hide" style="flex:1;justify-content:center;min-width:140px;" id="br-results-btn" onclick="mpShowFullHistoryModal()">📋 Ver Resultados</button>
     </div>
+    <div id="br-ready-status" class="muted hide" style="text-align:center;font-size:.78rem;margin-top:6px;"></div>
   </div>
 </div>
 
@@ -1705,10 +1707,15 @@ function _mpEnsureSocket(onOpen){
     } else if(msg.type==='draftPhase'){
       _mpRoom=msg.room;
       var panel=document.getElementById('room-panel'); if(panel)panel.classList.add('hide');
+      // Se isso veio de um "Jogar Novamente", pode ter um overlay (histórico
+      // da Copa anterior / controles de jogar novamente) ainda na tela.
+      if(_mpPlayAgainInterval){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;}
+      mpHideOverlay();
       toast('Todo mundo entrou! Monte seu time.','ok');
       startGame();
       G.mp={roomId:_mpRoom.id, playerId:_mpPlayerId};
       G._mpHistory=[]; G._mpPendingOver=null;
+      G._mpPlayAgainVoted=false; G._mpPlayAgainProgress=null; G._mpPlayAgainDeadline=null;
       G.speed='f'; // multiplayer: só a velocidade Rápida é permitida
       mpShowRecoveryButton();
     } else if(msg.type==='draftProgress'){
@@ -1748,6 +1755,7 @@ function _mpEnsureSocket(onOpen){
           // antes de qualquer partida (inclusive as bot-vs-bot) começar.
           G._phaseReadyDone=false;
           G._phaseReadyProgress=null;
+          G._mpAutoStartedKey=null;
         }
         if(prevDuel){
           var resolved=G.bracket.find(function(m){return m._mpId===prevDuel._mpId;});
@@ -1772,6 +1780,11 @@ function _mpEnsureSocket(onOpen){
       if(activeScreen2&&activeScreen2.id==='s-bracket')showBracket3();
     } else if(msg.type==='tournamentOver'){
       G._mpHistory=msg.history||G._mpHistory||[];
+      // Nova Copa pode terminar de novo depois de um "Jogar Novamente" —
+      // sempre zera o estado do voto anterior antes de tratar essa.
+      G._mpPlayAgainVoted=false;
+      G._mpPlayAgainProgress=null;
+      G._mpPlayAgainDeadline=null;
       var elimOverlay=document.getElementById('mp-overlay');
       var isEliminatedShowing=elimOverlay&&elimOverlay.dataset.mpState==='eliminated';
       if(isEliminatedShowing){
@@ -1785,6 +1798,10 @@ function _mpEnsureSocket(onOpen){
         if(champ&&champ.ownerId===_mpPlayerId){
           G.phase='final';
           _origShowEnd(true);
+          // A tela de fim de Copa do campeão é a mesma do modo solo — o
+          // "Jogar Novamente" entra como um overlay por cima dela, depois
+          // de um instante pra não atropelar a comemoração/medalhas.
+          setTimeout(function(){mpShowPlayAgainOverlay();},2200);
         } else {
           // Qualquer jogador que não seja o campeão — eliminado antes ou
           // já acompanhando os jogos — vê a sequência completa das
@@ -1792,6 +1809,19 @@ function _mpEnsureSocket(onOpen){
           mpShowFullHistoryModal(msg);
         }
       }
+    } else if(msg.type==='playAgainStatus'){
+      G._mpPlayAgainProgress={done:msg.done,total:msg.total};
+      mpStartPlayAgainCountdown(msg.deadline);
+    } else if(msg.type==='roomClosed'){
+      if(_mpPlayAgainInterval){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;}
+      mpHideOverlay();
+      mpRemoveLiveTicker();
+      mpHideRecoveryButton();
+      _mpRoom=null; _mpPlayerId=null;
+      G.mp=null;
+      var panel=document.getElementById('room-panel'); if(panel)panel.classList.add('hide');
+      toast(msg.reason==='timeout'?'Tempo esgotado — sala encerrada':'A sala foi encerrada','err');
+      show('s-menu');
     } else if(msg.type==='error'){
       toast(msg.message||'Erro na sala','err');
     }
@@ -3453,6 +3483,10 @@ function showBracket3(){
   var prog=G._phaseReadyProgress;
   var allReady=!G.mp||(prog&&prog.total>0&&prog.done>=prog.total);
   var btn=document.getElementById('br-play-btn');
+  var resultsBtn=document.getElementById('br-results-btn');
+  var statusLine=document.getElementById('br-ready-status');
+  if(resultsBtn)resultsBtn.classList.toggle('hide',!G.mp);
+  if(statusLine)statusLine.classList.add('hide');
   if(G.mp&&!meAnywhere){
     // Já fui eliminado — só acompanho, não entro no "check de prontos"
     // (senão a sala trava esperando alguém que não tem mais nada a jogar)
@@ -3463,10 +3497,27 @@ function showBracket3(){
     btn.onclick=function(){mpSendPhaseReady();};
   } else if(G.mp&&!allReady){
     btn.disabled=true;
-    btn.textContent='⏳ Aguardando outros jogadores'+(prog?(' ('+prog.done+'/'+prog.total+')'):'')+'...';
+    btn.textContent='▶️ Continuar';
     btn.onclick=null;
-  } else if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';btn.onclick=null;}
-  else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
+    if(statusLine){
+      statusLine.classList.remove('hide');
+      statusLine.textContent='⏳ Aguardando outros jogadores'+(prog?(' ('+prog.done+'/'+prog.total+')'):'')+'...';
+    }
+  } else if(G.mp){
+    // Todo mundo já confirmou "Continuar" — no multiplayer não existe um
+    // segundo botão "Jogar Partida" separado: a partida (ou a espera pelo
+    // confronto direto / fim de fase) já dispara sozinha daqui pra frente.
+    if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';btn.onclick=null;}
+    else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
+    else{
+      btn.disabled=true;btn.textContent='▶️ Continuar';btn.onclick=null;
+      var matchKey=pm2._mpId+(isDual&&pm2.hg!=null&&pm2.hg2==null?':leg2':':leg1');
+      if(G._mpAutoStartedKey!==matchKey){
+        G._mpAutoStartedKey=matchKey;
+        setTimeout(function(){playMatch();},250);
+      }
+    }
+  } else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
   else if(isDual&&pm2.hg!=null&&pm2.hg2==null){btn.disabled=false;btn.textContent='⚽ Jogo de Volta';btn.onclick=function(){playMatch();};}
   else{btn.disabled=false;btn.textContent='⚽ Jogar Partida';btn.onclick=function(){playMatch();};}
   show('s-bracket');
@@ -5330,9 +5381,9 @@ function renderMatchFinal(currentMin, showAll) {
       aggHtml = `<div style="font-size:.63rem;color:var(--gold);font-weight:700;">Agr: ${aggLeft}×${aggRight}</div>`;
     }
 
-    // ── Goal logs: cada lado mostra seus próprios artilheiros — vale
-    // tanto pra partida do jogador quanto pras demais partidas, já que
-    // agora todas revelam os gols em tempo real ──────────────────────
+    // ── Goal logs: só a partida do jogador mostra o nome de quem fez o
+    // gol. Nas demais partidas (não envolvem o jogador) mostramos só o
+    // placar sendo atualizado ao vivo, sem nomes de artilheiros ────────
     let leftLog = '', rightLog = '';
     if (isPlayerMatch) {
       var leftSc  = playerOnLeft ? playerScorerList : botScorerList;
@@ -5341,15 +5392,6 @@ function renderMatchFinal(currentMin, showAll) {
         leftLog = `<div class="goal-log">${leftSc.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
       if (rightSc.length)
         rightLog = `<div class="goal-log" style="text-align:right;">${rightSc.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
-    } else {
-      var leftScB  = (leftTeam === m.home) ? curHsc : curAsc;
-      var rightScB = (rightTeam === m.away) ? curAsc : curHsc;
-      var leftScBf  = showAll ? leftScB  : leftScB.filter(g => g.min <= currentMin);
-      var rightScBf = showAll ? rightScB : rightScB.filter(g => g.min <= currentMin);
-      if (leftScBf.length)
-        leftLog = `<div class="goal-log">${leftScBf.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
-      if (rightScBf.length)
-        rightLog = `<div class="goal-log" style="text-align:right;">${rightScBf.map(g => '⚽ ' + g.nome + ' ' + g.min + "'").join('<br>')}</div>`;
     }
 
     var penDisplay = m.pen;
@@ -7202,7 +7244,7 @@ function startGame() {
     dailyPts:0, _dailyPtsReported:0, eliminated:false, leg:1,
     _draftSkippedTeams:[], _draftPool:[], _draftPoolIdx:0,
     _botResultsPending:false, wonAllNormalTime:true,
-    _phaseReadyDone:false, _phaseReadyProgress:null
+    _phaseReadyDone:false, _phaseReadyProgress:null, _mpAutoStartedKey:null
   };
   document.querySelectorAll('.cswatch').forEach(function(s){ s.classList.remove('sel'); });
   var az = document.querySelector('.cswatch[data-c="azul"]');
@@ -8107,6 +8149,7 @@ function mpKeepWatching(){
   showBracket3();
 }
 function mpShowFullHistoryModal(overMsg){
+  overMsg = overMsg || {};
   var history=overMsg.history||G._mpHistory||[];
   var champ=overMsg.champion;
   var sections=history.map(function(round){
@@ -8121,16 +8164,74 @@ function mpShowFullHistoryModal(overMsg){
     }).join('');
     return '<div style="margin-bottom:12px;"><div style="font-weight:800;font-size:.82rem;margin-bottom:5px;color:var(--text);">'+label+'</div>'+rows+'</div>';
   }).join('');
+  if(!sections)sections='<p class="muted" style="font-size:.8rem;text-align:center;">Nenhuma rodada concluída ainda.</p>';
+  var old=document.getElementById('mp-overlay'); if(old)old.remove();
   var ov=document.createElement('div');
   ov.id='mp-overlay';
   ov.style.cssText='position:fixed;inset:0;background:rgba(9,9,15,.95);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  var header = champ
+    ? '<div style="text-align:center;font-size:2rem;">🏆</div><div style="text-align:center;font-weight:800;font-size:1.05rem;color:var(--gold);margin-bottom:14px;">'+champ.nome+' é o campeão da Copa!</div>'
+    : '<div style="text-align:center;font-size:2rem;">📋</div><div style="text-align:center;font-weight:800;font-size:1.05rem;color:var(--gold);margin-bottom:14px;">Resultados das Rodadas</div>';
+  var footerBtn = champ
+    ? mpPlayAgainControlsHTML()
+    : '<button class="btn btn-gold w100 mt8" style="justify-content:center;" onclick="mpHideOverlay()">Fechar</button>';
   ov.innerHTML='<div style="background:var(--card);border-radius:12px;padding:18px;max-width:400px;width:100%;max-height:82vh;overflow-y:auto;">'
-    +'<div style="text-align:center;font-size:2rem;">🏆</div>'
-    +'<div style="text-align:center;font-weight:800;font-size:1.05rem;color:var(--gold);margin-bottom:14px;">'+(champ?champ.nome:'???')+' é o campeão da Copa!</div>'
+    +header
     +sections
-    +'<button class="btn btn-gold w100 mt8" style="justify-content:center;" onclick="mpBackToMenu()">Voltar ao Menu Principal</button>'
+    +footerBtn
     +'</div>';
   document.body.appendChild(ov);
+  if(champ&&G._mpPlayAgainDeadline)mpStartPlayAgainCountdown(G._mpPlayAgainDeadline);
+}
+
+// ── "Jogar Novamente" ao fim da Copa ──────────────────────────────────
+var _mpPlayAgainInterval=null;
+function mpPlayAgainControlsHTML(){
+  return '<div id="mp-playagain-box" style="margin-top:14px;padding:10px;background:var(--card2);border-radius:10px;">'
+    +'<div style="font-weight:700;font-size:.85rem;color:var(--gold);margin-bottom:4px;">🔄 Jogar Novamente?</div>'
+    +'<div id="mp-playagain-status" class="muted" style="font-size:.75rem;margin-bottom:8px;">Todo mundo tem 10 segundos pra confirmar.</div>'
+    +'<div class="row" style="gap:8px;flex-wrap:wrap;">'
+      +'<button class="btn btn-gold" style="flex:1;justify-content:center;min-width:130px;" id="mp-playagain-btn" onclick="mpVotePlayAgain()">🔄 Jogar Novamente</button>'
+      +'<button class="btn btn-out" style="flex:1;justify-content:center;min-width:130px;" onclick="mpBackToMenu()">🚪 Voltar ao Menu</button>'
+    +'</div></div>';
+}
+function mpVotePlayAgain(){
+  if(G._mpPlayAgainVoted)return;
+  G._mpPlayAgainVoted=true;
+  var btn=document.getElementById('mp-playagain-btn');
+  if(btn){btn.disabled=true;btn.textContent='✅ Confirmado, aguardando outros...';}
+  if(_mpSocket&&_mpSocket.readyState===WebSocket.OPEN){
+    _mpSocket.send(JSON.stringify({type:'playAgain'}));
+  }
+}
+function mpStartPlayAgainCountdown(deadline){
+  G._mpPlayAgainDeadline=deadline;
+  if(_mpPlayAgainInterval){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;}
+  function tick(){
+    var el=document.getElementById('mp-playagain-status');
+    if(!el){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;return;}
+    var secs=Math.max(0,Math.ceil((deadline-Date.now())/1000));
+    var prog=G._mpPlayAgainProgress||{done:0,total:1};
+    el.textContent='⏳ '+prog.done+'/'+prog.total+' confirmaram — encerra em '+secs+'s';
+    if(secs<=0){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;}
+  }
+  tick();
+  _mpPlayAgainInterval=setInterval(tick,500);
+}
+// Overlay dedicado pro campeão (a tela dele é a de fim de Copa solo, não
+// passa pelo modal de histórico) — mesmos controles, só que sozinhos.
+function mpShowPlayAgainOverlay(){
+  var old=document.getElementById('mp-overlay'); if(old)old.remove();
+  var ov=document.createElement('div');
+  ov.id='mp-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(9,9,15,.95);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:var(--card);border-radius:12px;padding:18px;max-width:380px;width:100%;text-align:center;">'
+    +'<div style="font-size:2rem;">🏆</div>'
+    +'<div style="font-weight:800;font-size:1.05rem;color:var(--gold);margin-bottom:4px;">Copa encerrada!</div>'
+    +mpPlayAgainControlsHTML()
+    +'</div>';
+  document.body.appendChild(ov);
+  if(G._mpPlayAgainDeadline)mpStartPlayAgainCountdown(G._mpPlayAgainDeadline);
 }
 
 // ── Mercado da Bola no multiplayer: aplica as trocas/pula normalmente,
