@@ -25,7 +25,7 @@ const ROOM_TTL_MS = 6 * 60 * 60 * 1000; // limpa salas abandonadas após 6h
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sem 0/O/1/I
 
 const PHASES = ['4a', '5a', 'oitavas', 'quartas', 'semi', 'final'];
-const PLAY_AGAIN_WINDOW_MS = 10000; // 10s pra todo mundo confirmar "Jogar Novamente"
+const PLAY_AGAIN_WINDOW_MS = 20000; // 20s pra cada jogador confirmar "Jogar Novamente"
 
 /** @type {Map<string, any>} */
 const rooms = new Map();
@@ -270,12 +270,11 @@ function leaveRoom(ws) {
   ws.roomCode = null;
   if (!room) return;
   // Se alguém sai (ou volta pro menu) durante a janela de "Jogar
-  // Novamente", não tem mais como completar "todo mundo confirmou" —
-  // encerra a sala pra quem ficou, do mesmo jeito que se tivesse clicado
-  // em outro botão.
+  // Novamente", só ELE é removido da sala — os demais continuam podendo
+  // confirmar e jogar uma nova Copa entre si.
   if (room.stage === 'over' && room.playAgainTimer) {
-    console.log(`[${room.id}] jogador saiu durante a janela de "Jogar Novamente" — encerrando sala`);
-    closeRoom(room, 'player-left');
+    console.log(`[${room.id}] jogador saiu durante a janela de "Jogar Novamente" — removido da sala`);
+    removePlayerDuringPlayAgain(room, ws.id, 'declined');
     return;
   }
   const wasHost = room.players.get(ws.id)?.host;
@@ -302,8 +301,8 @@ function leaveRoom(ws) {
 // ── "Jogar Novamente" ao fim da Copa ──────────────────────────────────
 // Cada jogador tem PLAY_AGAIN_WINDOW_MS pra confirmar. Se todos confirmarem
 // a tempo, a sala reinicia pro draft de uma nova Copa (sem ninguém sair da
-// sala). Se alguém clicar em outra coisa (sai da sala) ou o tempo esgotar
-// sem todo mundo confirmar, a sala é encerrada pra todos.
+// sala). Quem clicar em "Voltar ao Menu" ou não confirmar a tempo é
+// removido individualmente — os demais continuam esperando/jogando entre si.
 function clearPlayAgainTimer(room) {
   if (room.playAgainTimer) { clearTimeout(room.playAgainTimer); room.playAgainTimer = null; }
 }
@@ -322,15 +321,47 @@ function startPlayAgainWindow(room) {
   room.playAgainDeadline = Date.now() + PLAY_AGAIN_WINDOW_MS;
   room.playAgainTimer = setTimeout(() => {
     if (!rooms.has(room.id)) return; // sala já foi fechada/reiniciada por outro caminho
-    console.log(`[${room.id}] tempo esgotado pra "Jogar Novamente" — encerrando sala`);
-    closeRoom(room, 'timeout');
+    resolvePlayAgainTimeout(room);
   }, PLAY_AGAIN_WINDOW_MS);
   broadcastPlayAgainStatus(room);
 }
-function closeRoom(room, reason) {
+// Remove UM jogador específico da sala durante a janela de "Jogar
+// Novamente" (ele clicou em "Voltar ao Menu" ou o tempo dele esgotou).
+// Os demais jogadores continuam na sala normalmente.
+function removePlayerDuringPlayAgain(room, playerId, reason) {
+  const player = room.players.get(playerId);
+  room.players.delete(playerId);
+  if (room.playAgainVotes) room.playAgainVotes.delete(playerId);
+  if (player && player.ws) send(player.ws, { type: 'roomClosed', reason });
+  if (room.players.size === 0) { clearPlayAgainTimer(room); rooms.delete(room.id); return; }
+  if (!Array.from(room.players.values()).some(p => p.host)) {
+    const next = room.players.values().next().value;
+    if (next) next.host = true;
+  }
+  if (room.playAgainVotes && room.playAgainVotes.size > 0 && room.playAgainVotes.size >= room.players.size) {
+    restartRoomForNewCup(room);
+  } else {
+    broadcast(room, { type: 'update', room: publicRoom(room) });
+    broadcastPlayAgainStatus(room);
+  }
+}
+// Tempo esgotado: remove todo mundo que não confirmou (cada um vai pro
+// menu individualmente); quem confirmou fica e a Copa reinicia pra eles.
+function resolvePlayAgainTimeout(room) {
+  const votes = room.playAgainVotes || new Set();
+  const toRemove = Array.from(room.players.values()).filter(p => !votes.has(p.id));
+  for (const p of toRemove) {
+    if (p.ws) send(p.ws, { type: 'roomClosed', reason: 'timeout' });
+    room.players.delete(p.id);
+  }
   clearPlayAgainTimer(room);
-  broadcast(room, { type: 'roomClosed', reason });
-  rooms.delete(room.id);
+  if (room.players.size === 0) { rooms.delete(room.id); return; }
+  if (!Array.from(room.players.values()).some(p => p.host)) {
+    const next = room.players.values().next().value;
+    if (next) next.host = true;
+  }
+  console.log(`[${room.id}] "Jogar Novamente": ${toRemove.length} jogador(es) removido(s) por não confirmar a tempo, ${room.players.size} continuam`);
+  restartRoomForNewCup(room);
 }
 function restartRoomForNewCup(room) {
   clearPlayAgainTimer(room);

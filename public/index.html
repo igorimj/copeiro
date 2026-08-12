@@ -1716,6 +1716,7 @@ function _mpEnsureSocket(onOpen){
       G.mp={roomId:_mpRoom.id, playerId:_mpPlayerId};
       G._mpHistory=[]; G._mpPendingOver=null;
       G._mpPlayAgainVoted=false; G._mpPlayAgainProgress=null; G._mpPlayAgainDeadline=null;
+      G._mpEliminatedShowing=false;
       G.speed='f'; // multiplayer: só a velocidade Rápida é permitida
       mpShowRecoveryButton();
     } else if(msg.type==='draftProgress'){
@@ -1737,6 +1738,17 @@ function _mpEnsureSocket(onOpen){
         // ele ser enviado. Só atualizamos o "ticker" com os dados brutos
         // que vieram do servidor, sem tocar no estado local do jogo.
         mpUpdateLiveTicker(msg.bracket);
+      } else if(G._mpEliminatedShowing){
+        // Já fui eliminado e ainda estou vendo a tela "Seu time foi
+        // eliminado" — uma partida de OUTRO jogador terminando em algum
+        // canto do chaveamento não pode arrancar essa tela do meu jeito
+        // (senão eu nunca chego a ler/clicar "Acompanhar Jogos"). Só
+        // atualizamos os dados por baixo dos panos; a tela só muda quando
+        // eu mesmo clicar em continuar.
+        var enteringOitavasElim = (msg.phase==='oitavas' && G.phase!=='oitavas');
+        G.phase=msg.phase;
+        G.bracket=mpConvertBracket(msg.bracket);
+        if(enteringOitavasElim)G.mercadoDone=false;
       } else {
         mpHideOverlay();
         // Detecta se eu era o lado "aguardando confronto direto" numa
@@ -1785,8 +1797,7 @@ function _mpEnsureSocket(onOpen){
       G._mpPlayAgainVoted=false;
       G._mpPlayAgainProgress=null;
       G._mpPlayAgainDeadline=null;
-      var elimOverlay=document.getElementById('mp-overlay');
-      var isEliminatedShowing=elimOverlay&&elimOverlay.dataset.mpState==='eliminated';
+      var isEliminatedShowing=!!G._mpEliminatedShowing;
       if(isEliminatedShowing){
         // O jogador acabou de ver a própria eliminação — não interrompe
         // essa tela pra anunciar o campeão. Guarda pra mostrar só quando
@@ -1814,13 +1825,14 @@ function _mpEnsureSocket(onOpen){
       mpStartPlayAgainCountdown(msg.deadline);
     } else if(msg.type==='roomClosed'){
       if(_mpPlayAgainInterval){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;}
+      G._mpEliminatedShowing=false;
       mpHideOverlay();
       mpRemoveLiveTicker();
       mpHideRecoveryButton();
       _mpRoom=null; _mpPlayerId=null;
       G.mp=null;
       var panel=document.getElementById('room-panel'); if(panel)panel.classList.add('hide');
-      toast(msg.reason==='timeout'?'Tempo esgotado — sala encerrada':'A sala foi encerrada','err');
+      if(msg.reason==='timeout')toast('Você não confirmou a tempo — removido da sala','err');
       show('s-menu');
     } else if(msg.type==='error'){
       toast(msg.message||'Erro na sala','err');
@@ -2111,6 +2123,7 @@ function mpShowChampionOverlay(champ){
   document.body.appendChild(ov);
 }
 function mpBackToMenu(){
+  G._mpEliminatedShowing=false;
   mpHideOverlay();
   mpRemoveLiveTicker();
   mpHideRecoveryButton();
@@ -8125,6 +8138,7 @@ showEnd = function(won){
 };
 function mpShowEliminatedOverlay(){
   var old=document.getElementById('mp-overlay'); if(old)old.remove();
+  G._mpEliminatedShowing=true;
   var ov=document.createElement('div');
   ov.id='mp-overlay';
   ov.dataset.mpState='eliminated';
@@ -8138,6 +8152,7 @@ function mpShowEliminatedOverlay(){
   document.body.appendChild(ov);
 }
 function mpKeepWatching(){
+  G._mpEliminatedShowing=false;
   mpHideOverlay();
   mpRemoveLiveTicker();
   if(G._mpPendingOver){
@@ -8189,7 +8204,7 @@ var _mpPlayAgainInterval=null;
 function mpPlayAgainControlsHTML(){
   return '<div id="mp-playagain-box" style="margin-top:14px;padding:10px;background:var(--card2);border-radius:10px;">'
     +'<div style="font-weight:700;font-size:.85rem;color:var(--gold);margin-bottom:4px;">🔄 Jogar Novamente?</div>'
-    +'<div id="mp-playagain-status" class="muted" style="font-size:.75rem;margin-bottom:8px;">Todo mundo tem 10 segundos pra confirmar.</div>'
+    +'<div id="mp-playagain-status" class="muted" style="font-size:.75rem;margin-bottom:8px;">Você tem 20 segundos pra confirmar.</div>'
     +'<div class="row" style="gap:8px;flex-wrap:wrap;">'
       +'<button class="btn btn-gold" style="flex:1;justify-content:center;min-width:130px;" id="mp-playagain-btn" onclick="mpVotePlayAgain()">🔄 Jogar Novamente</button>'
       +'<button class="btn btn-out" style="flex:1;justify-content:center;min-width:130px;" onclick="mpBackToMenu()">🚪 Voltar ao Menu</button>'
