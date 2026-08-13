@@ -1819,9 +1819,13 @@ function _mpEnsureSocket(onOpen){
     } else if(msg.type==='matchProgress'){
       if(!G._liveProgress)G._liveProgress={};
       G._liveProgress[msg.matchId+':'+msg.leg]={hg:msg.hg,ag:msg.ag,min:msg.min};
-      // Não força um re-render aqui: se eu estiver no meio da minha
-      // própria partida, isso já aparece no próximo "tick" (a cada 500ms)
-      // do meu próprio cronômetro, sem competir com essa animação.
+      // Se eu estiver no meio da MINHA própria partida, isso já aparece no
+      // próximo "tick" (a cada 500ms) do meu próprio cronômetro. Mas se eu
+      // estiver parado no chaveamento (por exemplo, esperando o confronto
+      // direto do meu adversário), preciso atualizar a tela na mão —
+      // senão o placar ao vivo nunca aparece pra quem só está esperando.
+      var liveScreen=document.querySelector('.screen.active');
+      if(liveScreen&&liveScreen.id==='s-bracket'&&typeof showBracket3==='function')showBracket3();
     } else if(msg.type==='tournamentOver'){
       G._mpHistory=msg.history||G._mpHistory||[];
       // Nova Copa pode terminar de novo depois de um "Jogar Novamente" —
@@ -3601,7 +3605,20 @@ function showBracket3(){
     // Todo mundo já confirmou "Continuar" — no multiplayer não existe um
     // segundo botão "Jogar Partida" separado: a partida (ou a espera pelo
     // confronto direto / fim de fase) já dispara sozinha daqui pra frente.
-    if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';btn.onclick=null;}
+    if(awaitingDuel){
+      btn.disabled=true;
+      btn.onclick=null;
+      // O outro lado do confronto direto é quem realmente joga — mas ele
+      // já manda o placar parcial em tempo real (mpSendMatchProgress),
+      // então mostramos isso aqui em vez de deixar uma mensagem estática
+      // parada o jogo inteiro.
+      var duelLive=G._liveProgress&&(G._liveProgress[awaitingDuel._mpId+':2']||G._liveProgress[awaitingDuel._mpId+':1']);
+      if(duelLive){
+        btn.textContent='⚽ '+awaitingDuel.home.nome+' '+duelLive.hg+' × '+duelLive.ag+' '+awaitingDuel.away.nome+' ('+duelLive.min+"')";
+      } else {
+        btn.textContent='⚔️ Aguardando confronto direto...';
+      }
+    }
     else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
     else{
       var needsLeg2=isDual&&pm2.hg!=null&&pm2.hg2==null;
@@ -7756,7 +7773,20 @@ async function finishMatch3() {
   if (pw) _updateFansOnWin();
 
   setTimeout(function() {
-    if (pw) advancePhase();
+    if (pw) {
+      advancePhase();
+      if (G.mp) {
+        // No multiplayer, advancePhase() só manda o resultado pro
+        // servidor — nada tira o jogador da tela da própria partida
+        // localmente. Se a resposta do servidor chegar enquanto essa
+        // tela ainda for considerada "ocupada", ela é ignorada (só
+        // atualiza o ticker), e o jogador ficaria preso aqui pra sempre.
+        // Então saímos pro chaveamento por conta própria — quando a
+        // atualização real do servidor chegar (já não estamos mais na
+        // tela da partida), ela processa normalmente por cima disso.
+        setTimeout(function() { if (typeof showBracket3 === 'function') showBracket3(); }, 300);
+      }
+    }
     else { G.eliminated = true; showEnd(false); }
   }, 2000);
 }
