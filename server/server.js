@@ -218,6 +218,7 @@ function advanceUntilActionable(room) {
     room.phase = PHASES[idx + 1];
     room.bracket = buildPhase(room, room.phase);
     room.phaseReady = new Set(); // nova fase — todo mundo precisa clicar em "Continuar" de novo
+    room.legReady = new Set(); // idem pra sincronizar ida/volta dentro da fase
   }
 }
 
@@ -246,6 +247,20 @@ function activePlayerIds(room) {
   for (const m of (room.bracket || [])) {
     if (m.home && m.home.kind === 'human' && m.home.ownerId) ids.add(m.home.ownerId);
     if (m.away && m.away.kind === 'human' && m.away.ownerId) ids.add(m.away.ownerId);
+  }
+  return ids;
+}
+// IDs dos jogadores humanos que precisam pessoalmente jogar (ida e volta)
+// a própria partida nesta fase — ou seja, exclui o lado "away" de um
+// confronto direto entre dois humanos (só o "home" joga esse, o outro só
+// espera). É esse subconjunto que precisa se sincronizar entre ida e volta.
+function legGrindingPlayerIds(room) {
+  const ids = new Set();
+  for (const m of (room.bracket || [])) {
+    if (!m.home || !m.away) continue;
+    const bothHuman = m.home.kind === 'human' && m.away.kind === 'human';
+    if (m.home.kind === 'human' && m.home.ownerId) ids.add(m.home.ownerId);
+    if (m.away.kind === 'human' && m.away.ownerId && !bothHuman) ids.add(m.away.ownerId);
   }
   return ids;
 }
@@ -282,6 +297,7 @@ function leaveRoom(ws) {
   room.draftDone.delete(ws.id);
   room.teams.delete(ws.id);
   if (room.phaseReady) room.phaseReady.delete(ws.id);
+  if (room.legReady) room.legReady.delete(ws.id);
   if (room.players.size === 0) { rooms.delete(room.id); return; }
   if (wasHost) {
     const next = room.players.values().next().value;
@@ -295,6 +311,9 @@ function leaveRoom(ws) {
     const activeIds = activePlayerIds(room);
     const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
     broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
+    const grindIds = legGrindingPlayerIds(room);
+    const legDone = room.legReady ? Array.from(room.legReady).filter(id => grindIds.has(id)).length : 0;
+    broadcast(room, { type: 'legReadyProgress', phase: room.phase, done: legDone, total: grindIds.size, doneIds: room.legReady ? Array.from(room.legReady) : [] });
   }
 }
 
@@ -519,6 +538,7 @@ wss.on('connection', (ws) => {
           room.phase = '4a';
           room.bracket = buildPhase4a(room);
           room.phaseReady = new Set();
+          room.legReady = new Set();
           advanceUntilActionable(room);
           console.log(`[${room.id}] torneio iniciado — fase ${room.phase}, ${room.bracket.length} partidas`);
           broadcastTournamentState(room);
@@ -593,6 +613,9 @@ wss.on('connection', (ws) => {
           const activeIds = activePlayerIds(room);
           const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
           send(ws, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
+          const grindIds = legGrindingPlayerIds(room);
+          const legDone = room.legReady ? Array.from(room.legReady).filter(id => grindIds.has(id)).length : 0;
+          send(ws, { type: 'legReadyProgress', phase: room.phase, done: legDone, total: grindIds.size, doneIds: room.legReady ? Array.from(room.legReady) : [] });
         } else if (room.stage === 'over') {
           send(ws, { type: 'tournamentOver', champion: room.champion, bracket: publicBracket(room), history: room.history });
           if (room.playAgainTimer) send(ws, { type: 'playAgainStatus', done: room.playAgainVotes ? room.playAgainVotes.size : 0, total: room.players.size, doneIds: room.playAgainVotes ? Array.from(room.playAgainVotes) : [], deadline: room.playAgainDeadline || null });
@@ -617,6 +640,45 @@ wss.on('connection', (ws) => {
         } else {
           broadcastPlayAgainStatus(room);
         }
+        break;
+      }
+      // jogador terminou a IDA da própria partida e confirmou que quer
+      // seguir pra VOLTA — só libera quando todo mundo que também joga a
+      // própria partida (exclui quem só espera confronto direto) tiver
+      // terminado a ida também. Evita um ficar na ida e outro já na volta.
+      case 'legReady': {
+        const room = rooms.get(ws.roomCode);
+        if (!room || room.stage !== 'tournament') return;
+        if (!room.players.has(ws.id)) return;
+        if (msg.phase !== room.phase) return;
+        if (!room.legReady) room.legReady = new Set();
+        room.legReady.add(ws.id);
+        const grindIds = legGrindingPlayerIds(room);
+        const total = grindIds.size;
+        const done = Array.from(room.legReady).filter(id => grindIds.has(id)).length;
+        console.log(`[${room.id}] pronto pra volta na fase ${room.phase}: ${done}/${total}`);
+        broadcast(room, { type: 'legReadyProgress', phase: room.phase, done, total, doneIds: Array.from(room.legReady) });
+        break;
+      }
+      // relay de gols em tempo real: um jogador manda o placar parcial da
+      // PRÓPRIA partida (ainda rolando) pra que os outros vejam ao vivo,
+      // sem precisar esperar o resultado final ser reportado.
+      case 'matchProgress': {
+        const room = rooms.get(ws.roomCode);
+        if (!room || room.stage !== 'tournament') return;
+        const m = room.bracket.find(x => x.id === msg.matchId);
+        if (!m) return;
+        const claimsHome = m.home.kind === 'human' && m.home.ownerId === ws.id;
+        const claimsAway = m.away.kind === 'human' && m.away.ownerId === ws.id;
+        if (!claimsHome && !claimsAway) return;
+        broadcast(room, {
+          type: 'matchProgress',
+          matchId: m.id,
+          leg: msg.leg === 2 ? 2 : 1,
+          hg: Number.isFinite(msg.hg) ? msg.hg : 0,
+          ag: Number.isFinite(msg.ag) ? msg.ag : 0,
+          min: Number.isFinite(msg.min) ? msg.min : 0,
+        });
         break;
       }
       case 'leave': {

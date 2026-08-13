@@ -1716,13 +1716,30 @@ function _mpEnsureSocket(onOpen){
       G.mp={roomId:_mpRoom.id, playerId:_mpPlayerId};
       G._mpHistory=[]; G._mpPendingOver=null;
       G._mpPlayAgainVoted=false; G._mpPlayAgainProgress=null; G._mpPlayAgainDeadline=null;
-      G._mpEliminatedShowing=false;
+      G._mpEliminatedShowing=false; G._mpAwaitingEliminationResult=false;
       G.speed='f'; // multiplayer: só a velocidade Rápida é permitida
       mpShowRecoveryButton();
     } else if(msg.type==='draftProgress'){
       if(document.getElementById('mp-overlay'))mpShowDraftWaitOverlay({done:msg.done,total:msg.total,doneIds:msg.doneIds});
     } else if(msg.type==='tournamentUpdate'){
       G._mpHistory=msg.history||G._mpHistory||[];
+      if(G._mpAwaitingEliminationResult){
+        // Acabei de perder a própria partida e a Copa continua (ainda tem
+        // outras partidas rolando). Isso pode chegar bem no instante em
+        // que eu ainda estou vendo a tela final da minha partida — tudo
+        // bem processar aqui mesmo assim, porque meu resultado JÁ foi
+        // reportado (não corre risco de sobrescrever algo não enviado).
+        G._mpAwaitingEliminationResult=false;
+        var isNewPhaseElim=(msg.phase!==G.phase);
+        G.phase=msg.phase;
+        G.bracket=mpConvertBracket(msg.bracket);
+        if(isNewPhaseElim){
+          G._phaseReadyDone=false; G._phaseReadyProgress=null; G._mpAutoStartedKey=null;
+          G._legReadyDone=false; G._legReadyProgress=null; G._legReadyForKey=null; G._liveProgress={};
+        }
+        mpShowEliminatedOverlay();
+        return;
+      }
       var activeScreen=document.querySelector('.screen.active');
       // Telas onde o jogador pode estar no meio da resolução da própria
       // partida — inclui pênaltis (s-penalty), que tem sua própria tela
@@ -1768,6 +1785,10 @@ function _mpEnsureSocket(onOpen){
           G._phaseReadyDone=false;
           G._phaseReadyProgress=null;
           G._mpAutoStartedKey=null;
+          G._legReadyDone=false;
+          G._legReadyProgress=null;
+          G._legReadyForKey=null;
+          G._liveProgress={};
         }
         if(prevDuel){
           var resolved=G.bracket.find(function(m){return m._mpId===prevDuel._mpId;});
@@ -1790,6 +1811,17 @@ function _mpEnsureSocket(onOpen){
       G._phaseReadyProgress={done:msg.done,total:msg.total};
       var activeScreen2=document.querySelector('.screen.active');
       if(activeScreen2&&activeScreen2.id==='s-bracket')showBracket3();
+    } else if(msg.type==='legReadyProgress'){
+      if(msg.phase!==G.phase)return;
+      G._legReadyProgress={done:msg.done,total:msg.total};
+      var activeScreen3=document.querySelector('.screen.active');
+      if(activeScreen3&&activeScreen3.id==='s-bracket')showBracket3();
+    } else if(msg.type==='matchProgress'){
+      if(!G._liveProgress)G._liveProgress={};
+      G._liveProgress[msg.matchId+':'+msg.leg]={hg:msg.hg,ag:msg.ag,min:msg.min};
+      // Não força um re-render aqui: se eu estiver no meio da minha
+      // própria partida, isso já aparece no próximo "tick" (a cada 500ms)
+      // do meu próprio cronômetro, sem competir com essa animação.
     } else if(msg.type==='tournamentOver'){
       G._mpHistory=msg.history||G._mpHistory||[];
       // Nova Copa pode terminar de novo depois de um "Jogar Novamente" —
@@ -1797,6 +1829,13 @@ function _mpEnsureSocket(onOpen){
       G._mpPlayAgainVoted=false;
       G._mpPlayAgainProgress=null;
       G._mpPlayAgainDeadline=null;
+      // Se essa Copa acabou de ser encerrada pela MINHA própria eliminação
+      // (perdi a semifinal/final e não sobrou mais ninguém pra acompanhar),
+      // a tela de "Você foi eliminado" nunca chegou a aparecer (ficou
+      // esperando essa resposta) — então caímos direto no "else" abaixo,
+      // que já mostra o "Jogar Novamente" imediatamente, sem essa etapa
+      // intermediária.
+      G._mpAwaitingEliminationResult=false;
       var isEliminatedShowing=!!G._mpEliminatedShowing;
       if(isEliminatedShowing){
         // O jogador acabou de ver a própria eliminação — não interrompe
@@ -1825,7 +1864,7 @@ function _mpEnsureSocket(onOpen){
       mpStartPlayAgainCountdown(msg.deadline);
     } else if(msg.type==='roomClosed'){
       if(_mpPlayAgainInterval){clearInterval(_mpPlayAgainInterval);_mpPlayAgainInterval=null;}
-      G._mpEliminatedShowing=false;
+      G._mpEliminatedShowing=false; G._mpAwaitingEliminationResult=false;
       mpHideOverlay();
       mpRemoveLiveTicker();
       mpHideRecoveryButton();
@@ -1905,6 +1944,28 @@ function mpSubmitDraft(){
   mpShowDraftWaitOverlay({done:0,total:(_mpRoom&&_mpRoom.players?_mpRoom.players.length:1),doneIds:[]});
 }
 
+// Divide um total de gols entre ida e volta de forma determinística (a
+// mesma "sorte" pra qualquer tela que converta essa partida), a partir de
+// um hash simples da string-semente. Só cosmético — a soma nunca muda.
+function mpSplitLegGoals(seed,total){
+  if(!total)return[0,0];
+  var h=0;
+  for(var i=0;i<seed.length;i++){h=(h*31+seed.charCodeAt(i))>>>0;}
+  var leg2=h%(total+1);
+  return [total-leg2, leg2];
+}
+// Manda pro servidor (que retransmite pros outros jogadores da sala) o
+// placar parcial da MINHA própria partida, minuto a minuto, enquanto ela
+// ainda está rolando — é isso que deixa o outro jogador ver meus gols em
+// tempo real, em vez de só saber o resultado quando eu termino.
+function mpSendMatchProgress(pm,isLeg2,min){
+  if(!_mpSocket||_mpSocket.readyState!==WebSocket.OPEN||!pm||!pm._mpId)return;
+  var hsc=(isLeg2?pm.hsc2:pm.hsc)||[];
+  var asc=(isLeg2?pm.asc2:pm.asc)||[];
+  var hg=hsc.filter(function(g){return g.min<=min;}).length;
+  var ag=asc.filter(function(g){return g.min<=min;}).length;
+  _mpSocket.send(JSON.stringify({type:'matchProgress',matchId:pm._mpId,leg:isLeg2?2:1,hg:hg,ag:ag,min:min}));
+}
 function mpConvertTeam(t){
   var mine=(t.kind==='human'&&t.ownerId===_mpPlayerId);
   return {
@@ -1931,11 +1992,20 @@ function mpConvertBracket(list){
       hg:null,ag:null,hg2:null,ag2:null,hsc:[],asc:[],hsc2:[],asc2:[],pen:null, winner:winner};
     if(m.score){ entry.hg=m.score.home; entry.ag=m.score.away; entry.pen=m.score.pen||null; }
     var bothBot=(home._mpKind!=='human'&&away._mpKind!=='human');
-    if(bothBot&&entry.hg!=null){
+    var isDualNow=(typeof DUAL_PHASES!=='undefined')&&DUAL_PHASES.includes(G.phase);
+    if(bothBot&&entry.hg!=null&&isDualNow){
       // O servidor resolve bot-vs-bot num placar só, sem ida e volta de
-      // verdade. Preenchemos a "volta" como 0×0 (já encerrada) pra não
-      // ficar mostrando "Volta pendente" pra sempre numa fase de dois
-      // jogos — o placar de ida já É o resultado final dessa partida.
+      // verdade. Pra não ficar irreal (volta sempre 0×0), dividimos o
+      // agregado entre ida e volta de forma plausível — o total continua
+      // batendo com o resultado real, é só a distribuição por perna que é
+      // reconstituída. Usa uma "semente" fixa (o id da partida) pra todo
+      // mundo (host, adversários, quem só está acompanhando) ver a MESMA
+      // divisão, em vez de cada tela sortear um número diferente.
+      var hSplit=mpSplitLegGoals(entry._mpId+'h',entry.hg);
+      var aSplit=mpSplitLegGoals(entry._mpId+'a',entry.ag);
+      entry.hg=hSplit[0]; entry.hg2=hSplit[1];
+      entry.ag=aSplit[0]; entry.ag2=aSplit[1];
+    } else if(bothBot&&entry.hg!=null){
       entry.hg2=0; entry.ag2=0;
     }
     if(winner){
@@ -2111,6 +2181,17 @@ function mpSendPhaseReady(){
   }
   if(typeof showBracket3==='function')showBracket3();
 }
+// Terminei a ida da MINHA partida — avisa o servidor e espera todo mundo
+// que também joga a própria partida terminar a ida antes de eu começar a
+// volta (evita um ficar na ida enquanto o outro já está na volta).
+function mpSendLegReady(matchKey){
+  if(G._legReadyDone)return;
+  G._legReadyDone=true;
+  if(_mpSocket&&_mpSocket.readyState===WebSocket.OPEN){
+    _mpSocket.send(JSON.stringify({type:'legReady', phase:G.phase}));
+  }
+  if(typeof showBracket3==='function')showBracket3();
+}
 function mpShowChampionOverlay(champ){
   var old=document.getElementById('mp-overlay'); if(old)old.remove();
   var ov=document.createElement('div');
@@ -2123,7 +2204,7 @@ function mpShowChampionOverlay(champ){
   document.body.appendChild(ov);
 }
 function mpBackToMenu(){
-  G._mpEliminatedShowing=false;
+  G._mpEliminatedShowing=false; G._mpAwaitingEliminationResult=false;
   mpHideOverlay();
   mpRemoveLiveTicker();
   mpHideRecoveryButton();
@@ -3523,11 +3604,39 @@ function showBracket3(){
     if(awaitingDuel){btn.disabled=true;btn.textContent='⚔️ Aguardando confronto direto...';btn.onclick=null;}
     else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
     else{
-      btn.disabled=true;btn.textContent='▶️ Continuar';btn.onclick=null;
-      var matchKey=pm2._mpId+(isDual&&pm2.hg!=null&&pm2.hg2==null?':leg2':':leg1');
-      if(G._mpAutoStartedKey!==matchKey){
-        G._mpAutoStartedKey=matchKey;
-        setTimeout(function(){playMatch();},250);
+      var needsLeg2=isDual&&pm2.hg!=null&&pm2.hg2==null;
+      var matchKey=pm2._mpId+(needsLeg2?':leg2':':leg1');
+      if(needsLeg2&&G._legReadyForKey!==matchKey){
+        // Acabei de terminar a ida — reseta o "pronto pra volta" pra essa
+        // partida específica, pra não herdar o estado de uma fase antiga.
+        G._legReadyForKey=matchKey;
+        G._legReadyDone=false;
+        G._legReadyProgress=null;
+      }
+      var legProg=G._legReadyProgress;
+      var legAllReady=!needsLeg2||(legProg&&legProg.total>0&&legProg.done>=legProg.total);
+      if(needsLeg2&&!G._legReadyDone){
+        // Terminei a ida, mas ainda não avisei que tô pronto pra volta.
+        btn.disabled=false;
+        btn.textContent='▶️ Continuar (Volta)';
+        btn.onclick=function(){mpSendLegReady(matchKey);};
+      } else if(needsLeg2&&!legAllReady){
+        // Já avisei, mas nem todo mundo que também joga a própria
+        // partida terminou a ida ainda — não posso começar a volta sem
+        // eles, senão um fica na ida e o outro já na volta.
+        btn.disabled=true;
+        btn.textContent='▶️ Continuar (Volta)';
+        btn.onclick=null;
+        if(statusLine){
+          statusLine.classList.remove('hide');
+          statusLine.textContent='⏳ Aguardando outros jogadores terminarem a ida'+(legProg?(' ('+legProg.done+'/'+legProg.total+')'):'')+'...';
+        }
+      } else {
+        btn.disabled=true;btn.textContent='▶️ Continuar';btn.onclick=null;
+        if(G._mpAutoStartedKey!==matchKey){
+          G._mpAutoStartedKey=matchKey;
+          setTimeout(function(){playMatch();},250);
+        }
       }
     }
   } else if(!pm2){btn.disabled=true;btn.textContent='✅ Fase Concluída';btn.onclick=null;}
@@ -5280,6 +5389,7 @@ function startSim3() {
     var done = G._simTick >= G._simTotalSteps;
     if (done) G._botResultsPending = false;
     renderMatchFinal(min, done);
+    if (G.mp && pm && pm._mpId) mpSendMatchProgress(pm, isLeg2, min);
     if (done) { clearInterval(G.simTimer); setTimeout(() => finishMatch3(), 800); }
   }, 500);
 }
@@ -5369,12 +5479,24 @@ function renderMatchFinal(currentMin, showAll) {
       // esconder tudo até o apito final. Usa os artilheiros já
       // pré-simulados (hsc/asc ou hsc2/asc2 na volta) filtrando por
       // minuto, do mesmo jeito que já é feito pra partida do jogador.
+      // Partida de OUTRO jogador humano ainda rolando: usa o placar ao
+      // vivo retransmitido por ele (mpSendMatchProgress), em vez de ficar
+      // preso em "0 x 0" até ele terminar e reportar o resultado final.
       var curHsc = (isLeg2 ? m.hsc2 : m.hsc) || [];
       var curAsc = (isLeg2 ? m.asc2 : m.asc) || [];
       var curHgFinal = isLeg2 ? (m.hg2 ?? 0) : (m.hg ?? 0);
       var curAgFinal = isLeg2 ? (m.ag2 ?? 0) : (m.ag ?? 0);
-      var curHg = showAll ? curHgFinal : curHsc.filter(g => g.min <= currentMin).length;
-      var curAg = showAll ? curAgFinal : curAsc.filter(g => g.min <= currentMin).length;
+      var liveKey = m._mpId+':'+(isLeg2?2:1);
+      var live = (m.hg==null && G._liveProgress) ? G._liveProgress[liveKey] : null;
+      var curHg, curAg;
+      if (showAll) {
+        curHg = curHgFinal; curAg = curAgFinal;
+      } else if (live) {
+        curHg = live.hg; curAg = live.ag;
+      } else {
+        curHg = curHsc.filter(g => g.min <= currentMin).length;
+        curAg = curAsc.filter(g => g.min <= currentMin).length;
+      }
       dispLeft  = (leftTeam === m.home ? curHg : curAg);
       dispRight = (rightTeam === m.away ? curAg : curHg);
       playerScorerList = []; botScorerList = []; playerOnLeft = false;
@@ -7257,7 +7379,9 @@ function startGame() {
     dailyPts:0, _dailyPtsReported:0, eliminated:false, leg:1,
     _draftSkippedTeams:[], _draftPool:[], _draftPoolIdx:0,
     _botResultsPending:false, wonAllNormalTime:true,
-    _phaseReadyDone:false, _phaseReadyProgress:null, _mpAutoStartedKey:null
+    _phaseReadyDone:false, _phaseReadyProgress:null, _mpAutoStartedKey:null,
+    _legReadyDone:false, _legReadyProgress:null, _legReadyForKey:null, _liveProgress:{},
+    _mpAwaitingEliminationResult:false
   };
   document.querySelectorAll('.cswatch').forEach(function(s){ s.classList.remove('sel'); });
   var az = document.querySelector('.cswatch[data-c="azul"]');
@@ -8130,7 +8254,11 @@ showEnd = function(won){
   if(G.mp){
     if(!won){
       mpReportMyResult();
-      mpShowEliminatedOverlay();
+      // Não mostra a tela de "Você foi eliminado" ainda — espera a
+      // resposta do servidor (tournamentUpdate ou tournamentOver) pra
+      // saber se essa eliminação já encerrou a Copa. Se encerrou, pula
+      // direto pro "Jogar Novamente" em vez de passar por essa etapa.
+      G._mpAwaitingEliminationResult=true;
     }
     return;
   }
