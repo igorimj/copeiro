@@ -884,7 +884,7 @@ function nextDraftTeam(){G.draftTeam=TIMES[Math.floor(Math.random()*TIMES.length
 function renderDraftTeam(){
   var t=G.draftTeam,c=COLORS[G.color];
   $('d-tname').textContent=t.nome;$('d-tform').textContent=t.formacao;
-  $('d-plist').innerHTML=t.jogadores.slice(0,14).map((p,i)=>`
+  $('d-plist').innerHTML=t.jogadores.map((p,i)=>`
     <div class="pitem" id="dp-${i}" onclick="selectDP(${i})">
       <div class="shirt" style="background:${c.bg};color:${c.tx};">⚽</div>
       <div><div class="pname">${p.nome}</div><div class="ppos">${p.pos}</div></div>
@@ -1217,7 +1217,7 @@ function showMercado(){
     <div class="card mb8">
       <div class="card-t">${t.nome} — escolha 1 jogador (obrigatório)</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:7px;">
-        ${t.jogadores.slice(0,11).map((p,pi)=>`
+        ${t.jogadores.map((p,pi)=>`
           <div class="pitem" id="mkt-${ti}-${pi}" onclick="pickMkt(${ti},${pi})">
             <div class="shirt" style="background:${c.bg};color:${c.tx};">⚽</div>
             <div><div class="pname">${p.nome}</div><div class="ppos">${p.pos}</div></div>
