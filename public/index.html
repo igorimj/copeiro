@@ -1943,7 +1943,7 @@ function editRoomUsername(){
 function mpSubmitDraft(){
   if(!G.captain)G.captain=G.squad[0];
   if(_mpSocket&&_mpSocket.readyState===WebSocket.OPEN){
-    _mpSocket.send(JSON.stringify({type:'draftDone', team:{nome:G.teamName, formacao:G.formation, jogadores:G.squad}}));
+    _mpSocket.send(JSON.stringify({type:'draftDone', team:{nome:G.teamName, formacao:G.formation, jogadores:G.squad, color:G.color}}));
   }
   mpShowDraftWaitOverlay({done:0,total:(_mpRoom&&_mpRoom.players?_mpRoom.players.length:1),doneIds:[]});
 }
@@ -1974,7 +1974,8 @@ function mpConvertTeam(t){
   var mine=(t.kind==='human'&&t.ownerId===_mpPlayerId);
   return {
     nome:t.nome, formacao:t.formacao, jogadores:t.jogadores,
-    isPlayer:mine, _mpKind:t.kind, _mpOwnerId:t.ownerId, _mpMine:mine
+    isPlayer:mine, _mpKind:t.kind, _mpOwnerId:t.ownerId, _mpMine:mine,
+    _mpColor:t.color||null
   };
 }
 function mpConvertBracket(list){
@@ -3550,8 +3551,12 @@ function showBracket3(){
   
   var rows=G.bracket.filter(m=>m.home&&m.away).map((m,i)=>{
     var pm=m.home.isPlayer||m.away.isPlayer;
-    var hc=m.home.isPlayer?matchBg:'var(--card2)';var ht=m.home.isPlayer?c.tx:'var(--text)';
-    var ac=m.away.isPlayer?matchBg:'var(--card2)';var at=m.away.isPlayer?c.tx:'var(--text)';
+    var hColor=m.home._mpColor&&COLORS[m.home._mpColor];
+    var aColor=m.away._mpColor&&COLORS[m.away._mpColor];
+    var hc=hColor?(hColor.matchBg||hColor.bg):(m.home.isPlayer?matchBg:'var(--card2)');
+    var ht=hColor?hColor.tx:(m.home.isPlayer?c.tx:'var(--text)');
+    var ac=aColor?(aColor.matchBg||aColor.bg):(m.away.isPlayer?matchBg:'var(--card2)');
+    var at=aColor?aColor.tx:(m.away.isPlayer?c.tx:'var(--text)');
     let score='vs';
     if(isDual){
       if(m.hg!=null&&m.hg2!=null){
@@ -5462,10 +5467,17 @@ function renderMatchFinal(currentMin, showAll) {
     var lIsPlayer = !!leftTeam.isPlayer;
     var rIsPlayer = !!rightTeam.isPlayer;
 
-    var lc = lIsPlayer ? matchBg : 'var(--card2)';
-    var lt = lIsPlayer ? c.tx    : 'var(--text)';
-    var rc = rIsPlayer ? matchBg : 'var(--card2)';
-    var rt = rIsPlayer ? c.tx    : 'var(--text)';
+    var lc, lt, rc, rt;
+    // No multiplayer, cada time humano carrega a cor que o próprio
+    // jogador escolheu (_mpColor) — usamos ela pra destacar CADA jogador
+    // pela cor dele, não só a minha própria. No solo (sem _mpColor),
+    // cai no comportamento de sempre (só destaca o meu time).
+    var leftColor  = leftTeam._mpColor  && COLORS[leftTeam._mpColor];
+    var rightColor = rightTeam._mpColor && COLORS[rightTeam._mpColor];
+    if(leftColor){ lc = leftColor.matchBg||leftColor.bg; lt = leftColor.tx; }
+    else { lc = lIsPlayer ? matchBg : 'var(--card2)'; lt = lIsPlayer ? c.tx : 'var(--text)'; }
+    if(rightColor){ rc = rightColor.matchBg||rightColor.bg; rt = rightColor.tx; }
+    else { rc = rIsPlayer ? matchBg : 'var(--card2)'; rt = rIsPlayer ? c.tx : 'var(--text)'; }
 
     // ── Scores and scorers ──────────────────────────────────────────
     let dispLeft, dispRight, playerScorerList, botScorerList, playerOnLeft;

@@ -88,6 +88,7 @@ function humanTeam(playerId, drafted) {
   return {
     kind: 'human', ownerId: playerId,
     nome: drafted.nome, formacao: drafted.formacao, jogadores: drafted.jogadores,
+    color: drafted.color || 'azul',
   };
 }
 
@@ -232,8 +233,8 @@ function publicRoom(room) {
 function publicBracket(room) {
   return room.bracket.map(m => ({
     id: m.id,
-    home: { kind: m.home.kind, ownerId: m.home.ownerId, nome: m.home.nome, formacao: m.home.formacao, jogadores: m.home.jogadores },
-    away: { kind: m.away.kind, ownerId: m.away.ownerId, nome: m.away.nome, formacao: m.away.formacao, jogadores: m.away.jogadores },
+    home: { kind: m.home.kind, ownerId: m.home.ownerId, nome: m.home.nome, formacao: m.home.formacao, jogadores: m.home.jogadores, color: m.home.color || null },
+    away: { kind: m.away.kind, ownerId: m.away.ownerId, nome: m.away.nome, formacao: m.away.formacao, jogadores: m.away.jogadores, color: m.away.color || null },
     winnerSide: m.winnerSide || null,
     score: m.score || null,
   }));
@@ -245,6 +246,7 @@ function publicBracket(room) {
 function activePlayerIds(room) {
   const ids = new Set();
   for (const m of (room.bracket || [])) {
+    if (m.winnerSide) continue; // partida já totalmente decidida — esse jogador não precisa mais ser esperado
     if (m.home && m.home.kind === 'human' && m.home.ownerId) ids.add(m.home.ownerId);
     if (m.away && m.away.kind === 'human' && m.away.ownerId) ids.add(m.away.ownerId);
   }
@@ -258,6 +260,11 @@ function legGrindingPlayerIds(room) {
   const ids = new Set();
   for (const m of (room.bracket || [])) {
     if (!m.home || !m.away) continue;
+    // Partida já totalmente decidida (ida+volta) — o jogador dela já foi
+    // eliminado ou já avançou; não precisa mais ser esperado nesta fase.
+    // Sem isso, um jogador eliminado deixava o outro travado pra sempre
+    // esperando alguém que nunca mais vai clicar em nada.
+    if (m.winnerSide) continue;
     const bothHuman = m.home.kind === 'human' && m.away.kind === 'human';
     if (m.home.kind === 'human' && m.home.ownerId) ids.add(m.home.ownerId);
     if (m.away.kind === 'human' && m.away.ownerId && !bothHuman) ids.add(m.away.ownerId);
@@ -277,6 +284,12 @@ function broadcastTournamentState(room) {
     const activeIds = activePlayerIds(room);
     const done = room.phaseReady ? Array.from(room.phaseReady).filter(id => activeIds.has(id)).length : 0;
     broadcast(room, { type: 'phaseReadyProgress', phase: room.phase, done, total: activeIds.size, doneIds: room.phaseReady ? Array.from(room.phaseReady) : [] });
+    // Recalcula também quem ainda precisa terminar a ida antes da volta —
+    // isso é o que desbloqueia na hora quem ficou esperando um jogador
+    // que acabou de ser eliminado (ele sai da contagem imediatamente).
+    const grindIds = legGrindingPlayerIds(room);
+    const legDone = room.legReady ? Array.from(room.legReady).filter(id => grindIds.has(id)).length : 0;
+    broadcast(room, { type: 'legReadyProgress', phase: room.phase, done: legDone, total: grindIds.size, doneIds: room.legReady ? Array.from(room.legReady) : [] });
   }
 }
 
@@ -523,10 +536,12 @@ wss.on('connection', (ws) => {
         if (!room || room.stage !== 'draft') return;
         const team = msg.team || {};
         if (!Array.isArray(team.jogadores) || team.jogadores.length < 1) return;
+        const VALID_COLORS = new Set(['azul', 'verde', 'vermelho', 'amarelo', 'preto']);
         room.teams.set(ws.id, {
           nome: String(team.nome || 'Meu Time').slice(0, 30),
           formacao: String(team.formacao || '4-4-2'),
           jogadores: team.jogadores,
+          color: VALID_COLORS.has(team.color) ? team.color : 'azul',
         });
         room.draftDone.add(ws.id);
         const total = room.players.size;
