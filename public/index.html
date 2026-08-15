@@ -577,6 +577,7 @@ body{background:var(--dark);color:var(--text);font-family:'Inter',sans-serif;min
     <div class="row" style="flex-wrap:wrap;gap:9px;">
       <button class="btn btn-gold" style="flex:1;justify-content:center;min-width:140px;" id="br-play-btn" onclick="playMatch()">⚽ Jogar Partida</button>
       <button class="btn btn-out hide" style="flex:1;justify-content:center;min-width:140px;" id="br-results-btn" onclick="mpShowFullHistoryModal()">📋 Ver Resultados</button>
+      <button class="btn btn-out" style="flex:1;justify-content:center;min-width:140px;" onclick="showTopScorersModal()">🥇 Artilharia</button>
     </div>
     <div id="br-ready-status" class="muted hide" style="text-align:center;font-size:.78rem;margin-top:6px;"></div>
   </div>
@@ -660,6 +661,7 @@ body{background:var(--dark);color:var(--text);font-family:'Inter',sans-serif;min
   </div>
   <div class="row" style="flex-wrap:wrap;justify-content:center;gap:9px;">
     <button class="btn btn-out" onclick="show('s-menu')">↩ Menu</button>
+    <button class="btn btn-out" onclick="showTopScorersModal()">🥇 Artilharia</button>
     <button class="btn btn-gold hide" id="e-watch-btn" onclick="watchRest()">👁️ Acompanhar Jogos</button>
   </div>
 </div>
@@ -1736,6 +1738,7 @@ function _mpEnsureSocket(onOpen){
         if(isNewPhaseElim){
           G._phaseReadyDone=false; G._phaseReadyProgress=null; G._mpAutoStartedKey=null;
           G._legReadyDone=false; G._legReadyProgress=null; G._legReadyForKey=null; G._liveProgress={};
+          G._phaseWaitStart=null; G._legWaitStart=null;
         }
         mpShowEliminatedOverlay();
         return;
@@ -1789,6 +1792,8 @@ function _mpEnsureSocket(onOpen){
           G._legReadyProgress=null;
           G._legReadyForKey=null;
           G._liveProgress={};
+          G._phaseWaitStart=null;
+          G._legWaitStart=null;
         }
         if(prevDuel){
           var resolved=G.bracket.find(function(m){return m._mpId===prevDuel._mpId;});
@@ -1951,6 +1956,56 @@ function mpSubmitDraft(){
 // Divide um total de gols entre ida e volta de forma determinística (a
 // mesma "sorte" pra qualquer tela que converta essa partida), a partir de
 // um hash simples da string-semente. Só cosmético — a soma nunca muda.
+// ── Artilharia: acumula os gols de cada jogador (com o clube pelo qual
+// marcou) ao longo de toda a Copa. Funciona igual no solo e no
+// multiplayer — cada vez que uma partida (do jogador ou entre bots) tem
+// seus artilheiros definidos, eles entram nessa lista.
+function recordGoals(clube,scorers){
+  if(!scorers||!scorers.length)return;
+  if(!G.topScorers)G.topScorers={};
+  scorers.forEach(function(g){
+    var key=g.nome+'@'+clube;
+    if(!G.topScorers[key])G.topScorers[key]={nome:g.nome,clube:clube,gols:0};
+    G.topScorers[key].gols++;
+  });
+}
+function recordGoalsForMatch(m,isLeg2){
+  if(!m||!m.home||!m.away)return;
+  var hsc=(isLeg2?m.hsc2:m.hsc)||[];
+  var asc=(isLeg2?m.asc2:m.asc)||[];
+  recordGoals(m.home.nome,hsc);
+  recordGoals(m.away.nome,asc);
+}
+function showTopScorersModal(){
+  var list=Object.values(G.topScorers||{}).sort(function(a,b){
+    return b.gols-a.gols || a.nome.localeCompare(b.nome);
+  });
+  var rows=list.length
+    ? list.map(function(p,i){
+        return '<div style="display:flex;align-items:center;gap:10px;padding:7px 8px;'
+          +(i<3?'background:var(--card2);border-radius:8px;':'border-bottom:1px solid var(--border,#333);')
+          +'margin-bottom:3px;">'
+          +'<span style="width:22px;text-align:center;font-weight:700;color:var(--gold);font-size:.8rem;">'+(i+1)+'</span>'
+          +'<div style="flex:1;min-width:0;">'
+            +'<div style="font-weight:700;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+p.nome+'</div>'
+            +'<div class="muted" style="font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+p.clube+'</div>'
+          +'</div>'
+          +'<span style="font-weight:800;color:var(--gold);font-size:.95rem;white-space:nowrap;">'+p.gols+' ⚽</span>'
+          +'</div>';
+      }).join('')
+    : '<p class="muted" style="font-size:.8rem;text-align:center;">Nenhum gol registrado ainda.</p>';
+  var old=document.getElementById('topscorers-overlay'); if(old)old.remove();
+  var ov=document.createElement('div');
+  ov.id='topscorers-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(9,9,15,.92);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:var(--card);border-radius:12px;padding:18px;max-width:420px;width:100%;max-height:82vh;display:flex;flex-direction:column;">'
+    +'<div style="text-align:center;font-size:1.8rem;">🥇</div>'
+    +'<div style="text-align:center;font-weight:800;font-size:1.05rem;color:var(--gold);margin-bottom:12px;">Artilharia da Copa</div>'
+    +'<div style="overflow-y:auto;flex:1;">'+rows+'</div>'
+    +'<button class="btn btn-gold w100 mt8" style="justify-content:center;margin-top:12px;" onclick="document.getElementById(\'topscorers-overlay\').remove()">Voltar</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+}
 function mpSplitLegGoals(seed,total){
   if(!total)return[0,0];
   var h=0;
@@ -2178,6 +2233,36 @@ function mpHideOverlay(){
 // e espera todo mundo da sala fazer o mesmo antes de liberar o botão real
 // de jogar (evita alguém começar a rodada, e ver os placares das outras
 // partidas ao vivo, antes dos outros terem sequer visto o chaveamento novo).
+// ── Rede de segurança: o "check de prontos" (Continuar/Volta) é só uma
+// cortesia de UX — o servidor NUNCA bloqueia o envio de resultado de
+// partida por causa dele. Então, se por qualquer motivo (jogador que caiu
+// e reconectou com outra identidade, contagem que não bateu, etc.) a
+// espera nunca resolver sozinha, depois de alguns segundos oferecemos um
+// jeito de continuar mesmo assim, pra ninguém ficar travado pra sempre.
+var MP_WAIT_ESCAPE_MS=12000;
+var _mpWaitWatchdog=null;
+function mpEnsureWaitWatchdog(){
+  if(_mpWaitWatchdog)return;
+  _mpWaitWatchdog=setInterval(function(){
+    var activeScreen=document.querySelector('.screen.active');
+    if(activeScreen&&activeScreen.id==='s-bracket'&&typeof showBracket3==='function'){
+      showBracket3();
+    } else {
+      clearInterval(_mpWaitWatchdog);
+      _mpWaitWatchdog=null;
+    }
+  },2000);
+}
+function mpForceContinuePhase(){
+  G._phaseReadyProgress={done:1,total:1};
+  G._phaseWaitStart=null;
+  if(typeof showBracket3==='function')showBracket3();
+}
+function mpForceContinueLeg(){
+  G._legReadyProgress={done:1,total:1};
+  G._legWaitStart=null;
+  if(typeof showBracket3==='function')showBracket3();
+}
 function mpSendPhaseReady(){
   if(G._phaseReadyDone)return;
   G._phaseReadyDone=true;
@@ -3602,11 +3687,20 @@ function showBracket3(){
     btn.disabled=true;
     btn.textContent='▶️ Continuar';
     btn.onclick=null;
+    if(!G._phaseWaitStart)G._phaseWaitStart=Date.now();
+    mpEnsureWaitWatchdog();
+    var waitedPhase=Date.now()-G._phaseWaitStart;
     if(statusLine){
       statusLine.classList.remove('hide');
-      statusLine.textContent='⏳ Aguardando outros jogadores'+(prog?(' ('+prog.done+'/'+prog.total+')'):'')+'...';
+      var phaseTxt='⏳ Aguardando outros jogadores'+(prog?(' ('+prog.done+'/'+prog.total+')'):'')+'...';
+      if(waitedPhase>MP_WAIT_ESCAPE_MS){
+        statusLine.innerHTML=phaseTxt+' <button onclick="mpForceContinuePhase()" style="background:none;border:none;text-decoration:underline;color:var(--gold);cursor:pointer;font-size:.78rem;padding:0;">Demorando? Continuar mesmo assim</button>';
+      } else {
+        statusLine.textContent=phaseTxt;
+      }
     }
   } else if(G.mp){
+    G._phaseWaitStart=null;
     // Todo mundo já confirmou "Continuar" — no multiplayer não existe um
     // segundo botão "Jogar Partida" separado: a partida (ou a espera pelo
     // confronto direto / fim de fase) já dispara sozinha daqui pra frente.
@@ -3649,11 +3743,20 @@ function showBracket3(){
         btn.disabled=true;
         btn.textContent='▶️ Continuar (Volta)';
         btn.onclick=null;
+        if(!G._legWaitStart)G._legWaitStart=Date.now();
+        mpEnsureWaitWatchdog();
+        var waitedLeg=Date.now()-G._legWaitStart;
         if(statusLine){
           statusLine.classList.remove('hide');
-          statusLine.textContent='⏳ Aguardando outros jogadores terminarem a ida'+(legProg?(' ('+legProg.done+'/'+legProg.total+')'):'')+'...';
+          var legTxt='⏳ Aguardando outros jogadores terminarem a ida'+(legProg?(' ('+legProg.done+'/'+legProg.total+')'):'')+'...';
+          if(waitedLeg>MP_WAIT_ESCAPE_MS){
+            statusLine.innerHTML=legTxt+' <button onclick="mpForceContinueLeg()" style="background:none;border:none;text-decoration:underline;color:var(--gold);cursor:pointer;font-size:.78rem;padding:0;">Demorando? Continuar mesmo assim</button>';
+          } else {
+            statusLine.textContent=legTxt;
+          }
         }
       } else {
+        G._legWaitStart=null;
         btn.disabled=true;btn.textContent='▶️ Continuar';btn.onclick=null;
         if(G._mpAutoStartedKey!==matchKey){
           G._mpAutoStartedKey=matchKey;
@@ -5362,6 +5465,7 @@ function startSim3() {
       if (m.hg === null && m.winner === null) {
         var r = simMatch(m.home, m.away);
         m.hg = r.hg; m.ag = r.ag; m.hsc = r.hsc; m.asc = r.asc;
+        recordGoalsForMatch(m, false);
         if (!isDual) resolveBotWinner(m);
       } else if (m.hg !== null && (!m.hsc || !m.hsc.length) && (!m.asc || !m.asc.length) && (m.hg > 0 || m.ag > 0)) {
         // No multiplayer, bot-vs-bot já vem resolvido (placar e vencedor)
@@ -5371,6 +5475,7 @@ function startSim3() {
         var um = new Set();
         m.hsc = scorers(m.home, m.hg, um);
         m.asc = scorers(m.away, m.ag, um);
+        recordGoalsForMatch(m, false);
       }
     } else {
       if (m.hg2 === null && m.winner === null) {
@@ -5380,6 +5485,7 @@ function startSim3() {
         // é preciso inverter na hora de guardar em hg2/ag2 (que seguem a
         // convenção normal: hg2 = gols do m.home, ag2 = gols do m.away).
         m.hg2 = r.ag; m.ag2 = r.hg; m.hsc2 = r.asc; m.asc2 = r.hsc;
+        recordGoalsForMatch(m, true);
         var hT = m.hg + (m.hg2 || 0), aT = m.ag + (m.ag2 || 0);
         if (hT > aT) m.winner = m.home;
         else if (aT > hT) m.winner = m.away;
@@ -5388,6 +5494,7 @@ function startSim3() {
         var um2 = new Set();
         m.hsc2 = scorers(m.home, m.hg2, um2);
         m.asc2 = scorers(m.away, m.ag2, um2);
+        recordGoalsForMatch(m, true);
       }
     }
   });
@@ -7410,6 +7517,8 @@ function startGame() {
     _botResultsPending:false, wonAllNormalTime:true,
     _phaseReadyDone:false, _phaseReadyProgress:null, _mpAutoStartedKey:null,
     _legReadyDone:false, _legReadyProgress:null, _legReadyForKey:null, _liveProgress:{},
+    _phaseWaitStart:null, _legWaitStart:null,
+    topScorers:{},
     _mpAwaitingEliminationResult:false
   };
   document.querySelectorAll('.cswatch').forEach(function(s){ s.classList.remove('sel'); });
@@ -7875,6 +7984,7 @@ async function finishMatch3() {
   var isHome = pm.home.isPlayer;
   G._botResultsPending = false;
   renderMatchFinal(90, true);
+  recordGoalsForMatch(pm, isLeg2);
 
   if (isDual && !isLeg2) {
     // Ida do jogador concluída. A volta dos times controlados por bot só
